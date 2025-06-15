@@ -1,0 +1,368 @@
+import { useState, useEffect } from 'react';
+import { useDocuments } from './useDocuments';
+import { generateChatResponse, ChatMessage } from '../lib/openai';
+import { analyzeSentiment, SentimentResult } from '../lib/sentimentAnalysis';
+import { Chatbot } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
+
+export interface ChatbotMessage {
+  id: string;
+  text: string;
+  sender: 'user' | 'bot' | 'agent';
+  timestamp: Date;
+  sources?: string[];
+}
+
+export const useChatbot = (chatbot: Chatbot | null) => {
+  const [messages, setMessages] = useState<ChatbotMessage[]>([]);
+  const [isTyping, setIsTyping] = useState(false);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [sentimentHistory, setSentimentHistory] = useState<SentimentResult[]>([]);
+  const [isEscalated, setIsEscalated] = useState(false);
+  const [agentTakenOver, setAgentTakenOver] = useState(false);
+  const [assignedAgent, setAssignedAgent] = useState<any>(null);
+  const { fetchSimilarChunks } = useDocuments();
+
+  // Helper function to generate a simple hash (avoiding crypto.subtle.digest issues)
+  const generateSimpleHash = (text: string): string => {
+    let hash = 0;
+    for (let i = 0; i < text.length; i++) {
+      const char = text.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash).toString(36);
+  };
+
+  // Check if conversation has been taken over by an agent
+  useEffect(() => {
+    if (currentSessionId && chatbot) {
+      checkAgentTakeover();
+    }
+  }, [currentSessionId, chatbot]);
+
+  const checkAgentTakeover = async () => {
+    if (!currentSessionId || !chatbot) return;
+
+    try {
+      const conversationId = generateSimpleHash(`${chatbot.id}_session_${currentSessionId}`);
+      
+      // First check if we have a conversation record for this session
+      const { data: conversation } = await supabase
+        .from('conversations')
+        .select('id')
+        .eq('id', conversationId)
+        .single();
+
+      if (!conversation) {
+        // No conversation record exists yet, so no agent takeover
+        return;
+      }
+
+      const { data: agentAssignment, error } = await supabase
+        .from('conversation_agents')
+        .select(`
+          *,
+          agents(*)
+        `)
+        .eq('conversation_id', conversationId)
+        .single();
+
+      // Don't log error if no assignment found - this is normal
+      if (error && error.code !== 'PGRST116') {
+        console.error('Error checking agent takeover:', error);
+        return;
+      }
+
+      if (agentAssignment) {
+        console.log('🤝 Agent has taken over conversation:', agentAssignment.agents.name);
+        setAgentTakenOver(true);
+        setAssignedAgent(agentAssignment.agents);
+        
+        // Add agent takeover message if not already added
+        setMessages(prev => {
+          const hasAgentMessage = prev.some(msg => msg.id.startsWith('agent-takeover'));
+          if (!hasAgentMessage) {
+            const agentMessage: ChatbotMessage = {
+              id: `agent-takeover-${Date.now()}`,
+              text: `Hello! I'm ${agentAssignment.agents.name}, a human agent. I've taken over this conversation to provide you with personalized assistance. How can I help you?`,
+              sender: 'agent',
+              timestamp: new Date(),
+            };
+            return [...prev, agentMessage];
+          }
+          return prev;
+        });
+      } else {
+        // Check if agent was removed (handed back to bot)
+        if (agentTakenOver) {
+          console.log('🤖 Conversation handed back to bot');
+          setAgentTakenOver(false);
+          setAssignedAgent(null);
+          
+          // Add handback message
+          const handbackMessage: ChatbotMessage = {
+            id: `handback-${Date.now()}`,
+            text: "Thank you for your patience. I'm handing you back to our AI assistant who can continue to help you with your questions.",
+            sender: 'agent',
+            timestamp: new Date(),
+          };
+          setMessages(prev => [...prev, handbackMessage]);
+        }
+      }
+    } catch (error) {
+      console.error('Error checking agent takeover:', error);
+    }
+  };
+
+  const sendMessage = async (userMessage: string): Promise<void> => {
+    if (!chatbot) return;
+
+    // Add user message to UI immediately
+    const userChatMessage: ChatbotMessage = {
+      id: `user-${Date.now()}`,
+      text: userMessage,
+      sender: 'user',
+      timestamp: new Date(),
+    };
+
+    setMessages(prev => [...prev, userChatMessage]);
+    setIsTyping(true);
+
+    try {
+      // Create session ID if it doesn't exist
+      let sessionId = currentSessionId;
+      if (!sessionId) {
+        sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+        setCurrentSessionId(sessionId);
+        console.log('🔄 Created new session:', sessionId);
+      }
+
+      // Store user message using session-based approach
+      console.log('💾 Storing user message with session ID...');
+      const { data: userMessageData, error: userMessageError } = await supabase
+        .rpc('add_session_message', {
+          chatbot_id_param: chatbot.id,
+          session_id_param: sessionId,
+          content_param: userMessage,
+          role_param: 'user'
+        });
+
+      if (userMessageError) {
+        console.error('❌ Failed to store user message:', userMessageError);
+        throw new Error('Failed to store user message');
+      }
+
+      console.log('✅ User message stored successfully');
+
+      // Check for agent takeover BEFORE processing sentiment or generating responses
+      await checkAgentTakeover();
+
+      // If agent has taken over, don't generate automatic responses or analyze sentiment
+      if (agentTakenOver) {
+        console.log('🤖 Agent has taken over - skipping AI processing');
+        setIsTyping(false);
+        return;
+      }
+
+      // Only analyze sentiment and generate responses if no agent has taken over
+      console.log('🤖 No agent takeover detected, proceeding with AI response');
+
+      // Analyze sentiment of the last 5 messages (including current one) - only if not escalated
+      const recentMessages = [...messages.slice(-4), userChatMessage]
+        .filter(msg => msg.sender === 'user')
+        .map(msg => msg.text);
+
+      if (recentMessages.length > 0 && !isEscalated && !agentTakenOver) {
+        console.log('🔍 Analyzing sentiment for escalation...');
+        const sentimentResult = await analyzeSentiment(recentMessages);
+        setSentimentHistory(prev => [...prev.slice(-4), sentimentResult]);
+
+        console.log('📊 Sentiment analysis result:', sentimentResult);
+
+        // Check if escalation is needed
+        if (sentimentResult.shouldEscalate) {
+          console.log('🚨 Escalating conversation to human agent...');
+          await escalateToHumanAgent(sessionId);
+          setIsEscalated(true);
+          
+          // Add escalation message
+          const escalationMessage: ChatbotMessage = {
+            id: `escalation-${Date.now()}`,
+            text: "I understand you're having some difficulties. I'm connecting you with one of our human agents who will be able to better assist you. Please hold on for a moment.",
+            sender: 'bot',
+            timestamp: new Date(),
+          };
+          
+          setMessages(prev => [...prev, escalationMessage]);
+          setIsTyping(false);
+          return;
+        }
+      }
+
+      let context = '';
+      let sources: string[] = [];
+
+      // If chatbot has a knowledge base, search for relevant chunks
+      if (chatbot.knowledge_base_id) {
+        console.log('🔍 Searching knowledge base for relevant content...');
+        // Pass chatbot ID for public access in embedded mode
+        const similarChunks = await fetchSimilarChunks(userMessage, 3, chatbot.id);
+        
+        if (similarChunks.length > 0) {
+          context = similarChunks
+            .map(chunk => chunk.chunk_text)
+            .join('\n\n');
+          
+          sources = similarChunks.map(chunk => `Document chunk ${chunk.chunk_index + 1}`);
+          console.log(`✅ Found ${similarChunks.length} relevant chunks`);
+        } else {
+          console.log('ℹ️ No relevant chunks found in knowledge base');
+        }
+      }
+
+      // Prepare chat history for context
+      const chatHistory: ChatMessage[] = messages
+        .slice(-5) // Last 5 messages for context
+        .map(msg => ({
+          role: msg.sender === 'user' ? 'user' : 'assistant',
+          content: msg.text
+        }));
+
+      // Add current user message
+      chatHistory.push({
+        role: 'user',
+        content: userMessage
+      });
+
+      // Generate response using OpenAI
+      console.log('🤖 Generating AI response...');
+      const response = await generateChatResponse(chatHistory, context);
+
+      // Add bot response to UI
+      const botMessage: ChatbotMessage = {
+        id: `bot-${Date.now()}`,
+        text: response.message,
+        sender: 'bot',
+        timestamp: new Date(),
+        sources: response.sources || sources,
+      };
+
+      setMessages(prev => [...prev, botMessage]);
+
+      // Store bot message using session-based approach
+      console.log('💾 Storing bot message with session ID...');
+      const { data: botMessageData, error: botMessageError } = await supabase
+        .rpc('add_session_message', {
+          chatbot_id_param: chatbot.id,
+          session_id_param: sessionId,
+          content_param: response.message,
+          role_param: 'assistant'
+        });
+
+      if (botMessageError) {
+        console.error('❌ Failed to store bot message:', botMessageError);
+        // Don't throw error here as the user already sees the response
+      } else {
+        console.log('✅ Bot response stored successfully');
+      }
+
+    } catch (error) {
+      console.error('❌ Error generating bot response:', error);
+      
+      // Add error message
+      const errorMessage: ChatbotMessage = {
+        id: `bot-error-${Date.now()}`,
+        text: "I apologize, but I'm experiencing some technical difficulties. Please try again later.",
+        sender: 'bot',
+        timestamp: new Date(),
+      };
+
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
+  const escalateToHumanAgent = async (sessionId: string) => {
+    try {
+      // Find an available agent assigned to this chatbot
+      const { data: assignments, error: assignmentError } = await supabase
+        .from('agent_assignments')
+        .select(`
+          agent_id,
+          agents(*)
+        `)
+        .eq('chatbot_id', chatbot?.id)
+        .limit(1);
+
+      if (assignmentError || !assignments || assignments.length === 0) {
+        console.log('⚠️ No agents assigned to this chatbot');
+        return;
+      }
+
+      // Get the conversation ID for this session
+      const conversationId = generateSimpleHash(`${chatbot?.id}_session_${sessionId}`);
+
+      // Create notification for the agent
+      const { error: notificationError } = await supabase
+        .from('agent_notifications')
+        .insert([
+          {
+            agent_id: assignments[0].agent_id,
+            conversation_id: conversationId,
+            type: 'escalation',
+            message: `Customer conversation escalated due to negative sentiment in ${chatbot?.name}`,
+            chatbot_name: chatbot?.name,
+          },
+        ]);
+
+      if (notificationError) {
+        console.error('❌ Failed to create notification:', notificationError);
+      } else {
+        console.log('✅ Escalation notification created');
+      }
+    } catch (error) {
+      console.error('❌ Error during escalation:', error);
+    }
+  };
+
+  const initializeChat = () => {
+    if (!chatbot) return;
+
+    const welcomeMessage: ChatbotMessage = {
+      id: 'welcome',
+      text: chatbot.configuration?.welcomeMessage || "Hello! I'm your AI assistant. How can I help you today?",
+      sender: 'bot',
+      timestamp: new Date(),
+    };
+
+    setMessages([welcomeMessage]);
+    setCurrentSessionId(null); // Reset session
+    setSentimentHistory([]);
+    setIsEscalated(false);
+    setAgentTakenOver(false);
+    setAssignedAgent(null);
+  };
+
+  const clearChat = () => {
+    setMessages([]);
+    setCurrentSessionId(null);
+    setSentimentHistory([]);
+    setIsEscalated(false);
+    setAgentTakenOver(false);
+    setAssignedAgent(null);
+  };
+
+  return {
+    messages,
+    isTyping,
+    sentimentHistory,
+    isEscalated,
+    agentTakenOver,
+    assignedAgent,
+    sendMessage,
+    initializeChat,
+    clearChat,
+  };
+};
