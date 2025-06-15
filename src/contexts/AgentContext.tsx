@@ -43,6 +43,11 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         agentId: currentAgent.id,
         email: currentAgent.email,
         name: currentAgent.name,
+        agent_id: currentAgent.agent_id,
+        user_id: currentAgent.user_id,
+        password: currentAgent.password,
+        created_at: currentAgent.created_at,
+        updated_at: currentAgent.updated_at,
         timestamp: Date.now()
       });
       
@@ -90,7 +95,8 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         }
         
         if (sessionData) {
-          const { agentId, email, name, timestamp } = JSON.parse(sessionData);
+          const parsed = JSON.parse(sessionData);
+          const { agentId, email, name, agent_id, user_id, password, created_at, updated_at, timestamp } = parsed;
           
           // Check if session is less than 24 hours old
           const isSessionValid = Date.now() - timestamp < 24 * 60 * 60 * 1000;
@@ -101,11 +107,11 @@ export const AgentProvider: React.FC<{ children: ReactNode }> = ({ children }) =
               id: agentId,
               email: email,
               name: name,
-              user_id: '',
-              agent_id: '',
-              password: '',
-              created_at: '',
-              updated_at: ''
+              user_id: user_id || '',
+              agent_id: agent_id || '',
+              password: password || '',
+              created_at: created_at || '',
+              updated_at: updated_at || ''
             });
           } else {
             // Clear expired session

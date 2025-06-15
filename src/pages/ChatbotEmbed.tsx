@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase';
 import { ChatbotSecurity } from '../lib/chatbotSecurity';
 import ChatbotPreview from '../components/ChatbotPreview';
 import LoadingSpinner from '../components/LoadingSpinner';
+import { realtimeService } from '../lib/realtime';
 
 const ChatbotEmbed: React.FC = () => {
   const { chatbotId } = useParams<{ chatbotId: string }>();
@@ -12,6 +13,9 @@ const ChatbotEmbed: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [securityValidated, setSecurityValidated] = useState(false);
+  const [agentInterventionDetected, setAgentInterventionDetected] = useState(false);
+  const [currentAgentName, setCurrentAgentName] = useState<string | null>(null);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
 
   const isEmbedded = searchParams.get('embedded') === 'true';
   const token = searchParams.get('token');
@@ -88,6 +92,11 @@ const ChatbotEmbed: React.FC = () => {
         console.log('✅ Chatbot data loaded:', safeChatbot.name);
         setChatbot(safeChatbot);
 
+        // Generate session ID for this chat session
+        const sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+        setCurrentSessionId(sessionId);
+        console.log('🔄 Generated session ID:', sessionId);
+
         // Validate domain security if token is provided
         if (token) {
           const referrerDomain = ChatbotSecurity.getReferrerDomain();
@@ -134,6 +143,44 @@ const ChatbotEmbed: React.FC = () => {
     initializeChatbot();
   }, [chatbotId, token, domain]);
 
+  // Set up real-time subscriptions for agent intervention
+  useEffect(() => {
+    if (!chatbotId || !currentSessionId) return;
+
+    console.log('🔄 Setting up real-time agent intervention detection for chatbot:', chatbotId);
+
+    // Generate conversation ID for this session
+    const generateSimpleHash = (text: string): string => {
+      let hash = 0;
+      for (let i = 0; i < text.length; i++) {
+        const char = text.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash; // Convert to 32-bit integer
+      }
+      return Math.abs(hash).toString(36);
+    };
+
+    const conversationId = generateSimpleHash(`${chatbotId}_session_${currentSessionId}`);
+
+    // Subscribe to agent intervention events
+    realtimeService.subscribeAgentIntervention(conversationId, (data) => {
+      if (data.agent) {
+        console.log('🔔 Agent intervention detected in embed:', data.agent.name);
+        setAgentInterventionDetected(true);
+        setCurrentAgentName(data.agent.name);
+      } else {
+        console.log('🤖 Agent handed conversation back to bot');
+        setAgentInterventionDetected(false);
+        setCurrentAgentName(null);
+      }
+    });
+
+    return () => {
+      console.log('🔄 Cleaning up agent intervention subscription');
+      realtimeService.unsubscribe(`agent-intervention-${conversationId}`);
+    };
+  }, [chatbotId, currentSessionId]);
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
@@ -177,7 +224,12 @@ const ChatbotEmbed: React.FC = () => {
         <ChatbotPreview 
           visible={true} 
           onClose={() => {}} 
-          chatbot={chatbot}
+          chatbot={{
+            ...chatbot,
+            agentInterventionDetected,
+            currentAgentName,
+            currentSessionId
+          }}
           embedded={true}
         />
       </div>
@@ -200,7 +252,12 @@ const ChatbotEmbed: React.FC = () => {
             <ChatbotPreview 
               visible={true} 
               onClose={() => {}} 
-              chatbot={chatbot}
+              chatbot={{
+                ...chatbot,
+                agentInterventionDetected,
+                currentAgentName,
+                currentSessionId
+              }}
               embedded={false}
             />
           </div>

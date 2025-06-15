@@ -25,6 +25,7 @@ import { useAgents } from '../hooks/useAgents';
 import { useDocuments } from '../hooks/useDocuments';
 import { generateChatResponse, ChatMessage } from '../lib/openai';
 import { supabase } from '../lib/supabase';
+import { realtimeService } from '../lib/realtime';
 
 interface AssignedConversation {
   id: string;
@@ -66,7 +67,7 @@ const AgentDashboard: React.FC = () => {
   const [sendingMessage, setSendingMessage] = useState(false);
   const [availableConversations, setAvailableConversations] = useState<any[]>([]);
   const [showManualIntervention, setShowManualIntervention] = useState(false);
-  const [useKnowledgeBase, setUseKnowledgeBase] = useState(true); // Default to true
+  const [useKnowledgeBase, setUseKnowledgeBase] = useState(true);
   const [sendingWithKB, setSendingWithKB] = useState(false);
   const [handBackToBot, setHandBackToBot] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -90,6 +91,50 @@ const AgentDashboard: React.FC = () => {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Subscribe to real-time events for selected conversation
+  useEffect(() => {
+    if (!selectedConversation || !currentAgent) return;
+
+    console.log('🔄 Setting up real-time subscriptions for conversation:', selectedConversation);
+
+    // Subscribe to new messages
+    realtimeService.subscribeNewMessage(selectedConversation, (data) => {
+      if (data.conversationId === selectedConversation) {
+        console.log('💬 New message received in agent dashboard:', data.message);
+        setMessages((prev) => {
+          const exists = prev.some((msg) => msg.id === data.message.id);
+          if (exists) return prev;
+          return [...prev, data.message];
+        });
+        
+        // Update conversation list
+        setConversations((prev) =>
+          prev.map((conv) =>
+            conv.id === selectedConversation
+              ? {
+                  ...conv,
+                  lastMessage: data.message.content,
+                  lastMessageTime: data.message.created_at,
+                  messageCount: (conv.messageCount || 0) + 1,
+                }
+              : conv
+          )
+        );
+      }
+    });
+
+    // Subscribe to knowledge base toggles
+    realtimeService.subscribeKnowledgeBaseToggle(selectedConversation, (data) => {
+      console.log('🧠 Knowledge base toggled:', data.enabled);
+      setUseKnowledgeBase(data.enabled);
+    });
+
+    return () => {
+      realtimeService.unsubscribe(`messages-${selectedConversation}`);
+      realtimeService.unsubscribe(`knowledge-base-${selectedConversation}`);
+    };
+  }, [selectedConversation, currentAgent]);
 
   useEffect(() => {
     if (!currentAgent) {
@@ -133,68 +178,9 @@ const AgentDashboard: React.FC = () => {
     return () => {
       conversationSubscription.unsubscribe();
       notificationSubscription.unsubscribe();
+      realtimeService.unsubscribeAll();
     };
   }, [currentAgent, navigate]);
-
-  // Set up real-time message subscription for selected conversation
-  useEffect(() => {
-    if (!selectedConversation) return;
-
-    console.log('🔄 Setting up real-time messages for conversation:', selectedConversation);
-
-    const messageSubscription = supabase
-      .channel(`messages-${selectedConversation}`)
-      .on('postgres_changes',
-        { 
-          event: 'INSERT', 
-          schema: 'public', 
-          table: 'messages',
-          filter: `conversation_id=eq.${selectedConversation}`
-        },
-        (payload) => {
-          console.log('💬 New message received in agent dashboard:', payload.new);
-          
-          // Add the new message to the current messages
-          const newMessage: AgentMessage = {
-            id: payload.new.id,
-            content: payload.new.content,
-            role: payload.new.role,
-            created_at: payload.new.created_at,
-            is_agent_message: payload.new.role === 'assistant' && payload.new.agent_id
-          };
-
-          setMessages(prev => {
-            // Check if message already exists to avoid duplicates
-            const exists = prev.some(msg => msg.id === newMessage.id);
-            if (exists) {
-              console.log('💬 Message already exists in agent dashboard, skipping duplicate');
-              return prev;
-            }
-            
-            console.log('💬 Adding new message to agent dashboard:', newMessage);
-            return [...prev, newMessage];
-          });
-
-          // Update conversation list with new message info
-          setConversations(prev => prev.map(conv => 
-            conv.id === selectedConversation 
-              ? {
-                  ...conv,
-                  lastMessage: payload.new.content,
-                  lastMessageTime: payload.new.created_at,
-                  messageCount: (conv.messageCount || 0) + 1
-                }
-              : conv
-          ));
-        }
-      )
-      .subscribe();
-
-    return () => {
-      console.log('🔄 Cleaning up message subscription for conversation:', selectedConversation);
-      messageSubscription.unsubscribe();
-    };
-  }, [selectedConversation]);
 
   const fetchAssignedConversations = async () => {
     if (!currentAgent) return;
@@ -343,11 +329,13 @@ const AgentDashboard: React.FC = () => {
     try {
       console.log('📤 Sending agent message...');
       
+      const conversation = conversations.find(c => c.id === selectedConversation);
+      
       // Insert message with agent identification using RPC function
       const { data, error } = await supabase
         .rpc('add_session_message', {
-          chatbot_id_param: conversations.find(c => c.id === selectedConversation)?.chatbot_id,
-          session_id_param: conversations.find(c => c.id === selectedConversation)?.session_id,
+          chatbot_id_param: conversation?.chatbot_id,
+          session_id_param: conversation?.session_id,
           content_param: newMessage.trim(),
           role_param: 'assistant',
           agent_id_param: currentAgent!.id
@@ -364,18 +352,6 @@ const AgentDashboard: React.FC = () => {
       setNewMessage('');
 
       // The message will be added to the UI via real-time subscription
-      // Update conversation list
-      setConversations(prev => prev.map(conv => 
-        conv.id === selectedConversation 
-          ? {
-              ...conv,
-              lastMessage: newMessage.trim(),
-              lastMessageTime: new Date().toISOString(),
-              messageCount: (conv.messageCount || 0) + 1
-            }
-          : conv
-      ));
-
     } catch (err) {
       console.error('Failed to send message:', err);
       alert('Failed to send message');
@@ -443,18 +419,6 @@ const AgentDashboard: React.FC = () => {
       setNewMessage('');
 
       // The message will be added to the UI via real-time subscription
-      // Update conversation list
-      setConversations(prev => prev.map(conv => 
-        conv.id === selectedConversation 
-          ? {
-              ...conv,
-              lastMessage: response.message,
-              lastMessageTime: new Date().toISOString(),
-              messageCount: (conv.messageCount || 0) + 1
-            }
-          : conv
-      ));
-
     } catch (err) {
       console.error('Failed to send message with knowledge base:', err);
       alert('Failed to send message with knowledge base');
@@ -516,7 +480,8 @@ const AgentDashboard: React.FC = () => {
         .insert([
           {
             conversation_id: conversationId,
-            agent_id: currentAgent!.id
+            agent_id: currentAgent!.id,
+            knowledge_base_enabled: false
           }
         ]);
 
@@ -524,6 +489,7 @@ const AgentDashboard: React.FC = () => {
 
       // Disable knowledge base when taking over
       setUseKnowledgeBase(false);
+      await realtimeService.toggleKnowledgeBase(conversationId, false);
 
       // Create notification
       const conversation = availableConversations.find(c => c.id === conversationId);
@@ -861,7 +827,7 @@ const AgentDashboard: React.FC = () => {
                                     : 'bg-slate-100 text-slate-800'
                                 }`}
                               >
-                                <p className="text-sm">{message.content}</p>
+                                <p className="text-sm whitespace-pre-wrap">{message.content}</p>
                                 <div className="flex items-center justify-between mt-1">
                                   <p className={`text-xs ${
                                     message.role === 'user' 
