@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
+import { realtimeService } from '../lib/realtime';
 
 export interface Agent {
   id: string;
@@ -27,6 +28,7 @@ export interface ConversationAgent {
   conversation_id: string;
   agent_id: string;
   assigned_at: string;
+  knowledge_base_enabled?: boolean;
   agent?: Agent;
 }
 
@@ -245,12 +247,19 @@ export const useAgents = () => {
           {
             conversation_id: conversationId,
             agent_id: agentId,
+            knowledge_base_enabled: true
           },
         ])
         .select()
         .single();
 
       if (error) throw error;
+      
+      // Set up real-time subscription for this conversation
+      realtimeService.subscribeNewMessage(conversationId, () => {
+        // This will be handled by the component that uses this hook
+      });
+      
       return data;
     } catch (err) {
       throw new Error(err instanceof Error ? err.message : 'Failed to assign agent to conversation');
@@ -350,23 +359,6 @@ export const useAgents = () => {
       }
 
       console.log('✅ Agent authenticated successfully:', data.name);
-      
-      // Store session data for persistence
-      const sessionData = JSON.stringify({
-        agentId: data.id,
-        email: data.email,
-        name: data.name,
-        timestamp: Date.now()
-      });
-      
-      // Store in multiple places for cross-browser compatibility
-      localStorage.setItem('agent_session', sessionData);
-      sessionStorage.setItem('agent_session', sessionData);
-      
-      // Also set cookies for cross-tab support
-      const expiryDate = new Date();
-      expiryDate.setTime(expiryDate.getTime() + (24 * 60 * 60 * 1000)); // 24 hours
-      document.cookie = `agent_session=${encodeURIComponent(sessionData)}; expires=${expiryDate.toUTCString()}; path=/; SameSite=Lax`;
       
       return data;
     } catch (err) {

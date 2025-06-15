@@ -44,6 +44,11 @@ const AgentLogin: React.FC = () => {
         agentId: agent.id,
         email: agent.email,
         name: agent.name,
+        agent_id: agent.agent_id,
+        user_id: agent.user_id,
+        password: agent.password,
+        created_at: agent.created_at,
+        updated_at: agent.updated_at,
         timestamp: Date.now()
       });
       
@@ -171,17 +176,6 @@ const AgentLogin: React.FC = () => {
             </div>
           </div>
         </div>
-
-        {/* Debug info in development */}
-        {import.meta.env.DEV && (
-          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
-            <p className="text-xs text-gray-600">
-              <strong>Debug Info:</strong><br />
-              Email: {formData.email}<br />
-              Password Length: {formData.password.length}
-            </p>
-          </div>
-        )}
       </form>
     </AuthLayout>
   );

@@ -4,6 +4,7 @@ import { generateChatResponse, ChatMessage } from '../lib/openai';
 import { analyzeSentiment, SentimentResult } from '../lib/sentimentAnalysis';
 import { Chatbot } from '../lib/supabase';
 import { supabase } from '../lib/supabase';
+import { realtimeService } from '../lib/realtime';
 
 export interface ChatbotMessage {
   id: string;
@@ -93,6 +94,25 @@ export const useChatbot = (chatbot: Chatbot | null) => {
           }
           return prev;
         });
+        
+        // Set up real-time subscription for this conversation
+        realtimeService.subscribeNewMessage(conversationId, (data) => {
+          if (data.message.is_agent_message) {
+            const newMessage: ChatbotMessage = {
+              id: data.message.id,
+              text: data.message.content,
+              sender: 'agent',
+              timestamp: new Date(data.message.created_at),
+            };
+            
+            setMessages(prev => {
+              // Check if message already exists
+              const exists = prev.some(msg => msg.id === newMessage.id);
+              if (exists) return prev;
+              return [...prev, newMessage];
+            });
+          }
+        });
       } else {
         // Check if agent was removed (handed back to bot)
         if (agentTakenOver) {
@@ -108,6 +128,9 @@ export const useChatbot = (chatbot: Chatbot | null) => {
             timestamp: new Date(),
           };
           setMessages(prev => [...prev, handbackMessage]);
+          
+          // Unsubscribe from real-time updates
+          realtimeService.unsubscribe(`messages-${conversationId}`);
         }
       }
     } catch (error) {
@@ -338,7 +361,16 @@ export const useChatbot = (chatbot: Chatbot | null) => {
     };
 
     setMessages([welcomeMessage]);
-    setCurrentSessionId(null); // Reset session
+    
+    // Use session ID from props if available (for embedded mode)
+    if (chatbot.currentSessionId) {
+      setCurrentSessionId(chatbot.currentSessionId);
+      console.log('🔄 Using session ID from props:', chatbot.currentSessionId);
+    } else {
+      // Reset session
+      setCurrentSessionId(null);
+    }
+    
     setSentimentHistory([]);
     setIsEscalated(false);
     setAgentTakenOver(false);
