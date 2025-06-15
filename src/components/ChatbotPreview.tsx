@@ -910,4 +910,4 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   );
 };
 
-export default ChatbotPreview
+export { ChatbotPreview as default };
