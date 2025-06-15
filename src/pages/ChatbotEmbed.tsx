@@ -254,3 +254,5 @@ const ChatbotEmbed: React.FC = () => {
     </div>
   );
 };
+
+export default ChatbotEmbed
