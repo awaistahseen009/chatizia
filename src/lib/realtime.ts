@@ -47,20 +47,26 @@ class RealtimeService {
         },
         async (payload) => {
           console.log('🔔 Agent intervention detected:', payload.new);
-          // Fetch agent details
-          const { data: agent, error } = await this.supabase
-            .from('agents')
-            .select('id, name, email')
-            .eq('id', payload.new.agent_id)
-            .single();
-          if (error) {
-            console.error('Failed to fetch agent:', error);
-            return;
+          try {
+            // Fetch agent details
+            const { data: agent, error } = await this.supabase
+              .from('agents')
+              .select('id, name, email, agent_id')
+              .eq('id', payload.new.agent_id)
+              .single();
+            
+            if (error) {
+              console.error('Failed to fetch agent:', error);
+              return;
+            }
+            
+            callback({
+              conversationId: payload.new.conversation_id,
+              agent: agent,
+            });
+          } catch (err) {
+            console.error('Error in agent intervention callback:', err);
           }
-          callback({
-            conversationId: payload.new.conversation_id,
-            agent: agent,
-          });
         }
       )
       .on(
@@ -108,18 +114,22 @@ class RealtimeService {
           filter: `conversation_id=eq.${conversationId}`,
         },
         (payload) => {
-          console.log('💬 New message received:', payload.new);
-          callback({
-            conversationId: payload.new.conversation_id,
-            message: {
-              id: payload.new.id,
-              content: payload.new.content,
-              role: payload.new.role,
-              created_at: payload.new.created_at,
-              is_agent_message: !!payload.new.agent_id,
-              agent_id: payload.new.agent_id,
-            },
-          });
+          console.log('💬 New message received via real-time:', payload.new);
+          try {
+            callback({
+              conversationId: payload.new.conversation_id,
+              message: {
+                id: payload.new.id,
+                content: payload.new.content,
+                role: payload.new.role,
+                created_at: payload.new.created_at,
+                is_agent_message: !!payload.new.agent_id,
+                agent_id: payload.new.agent_id,
+              },
+            });
+          } catch (err) {
+            console.error('Error in message callback:', err);
+          }
         }
       )
       .subscribe((status) => {
@@ -152,10 +162,14 @@ class RealtimeService {
         },
         (payload) => {
           console.log('🧠 Knowledge base toggle detected:', payload.new);
-          callback({
-            conversationId: payload.new.conversation_id,
-            enabled: payload.new.knowledge_base_enabled,
-          });
+          try {
+            callback({
+              conversationId: payload.new.conversation_id,
+              enabled: payload.new.knowledge_base_enabled,
+            });
+          } catch (err) {
+            console.error('Error in knowledge base toggle callback:', err);
+          }
         }
       )
       .subscribe((status) => {
@@ -190,14 +204,21 @@ class RealtimeService {
     enabled: boolean,
   ): Promise<void> {
     try {
+      console.log(`🧠 Toggling knowledge base for ${conversationId}: ${enabled}`);
       const { error } = await this.supabase
         .from('conversation_agents')
         .update({ knowledge_base_enabled: enabled })
         .eq('conversation_id', conversationId);
-      if (error) throw error;
+      
+      if (error) {
+        console.error('Failed to toggle knowledge base:', error);
+        throw error;
+      }
+      
       console.log(`🧠 Knowledge base ${enabled ? 'enabled' : 'disabled'} for ${conversationId}`);
     } catch (err) {
       console.error('Failed to toggle knowledge base:', err);
+      throw err;
     }
   }
 }

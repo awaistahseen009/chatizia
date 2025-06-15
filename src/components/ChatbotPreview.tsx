@@ -52,8 +52,6 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   const [messages, setMessages] = useState<ExtendedMessage[]>([]);
   const [showTranscript, setShowTranscript] = useState<Record<string, boolean>>({});
   const [microphoneSupported, setMicrophoneSupported] = useState(true);
-  const [agentInterventionDetected, setAgentInterventionDetected] = useState(false);
-  const [currentAgentName, setCurrentAgentName] = useState<string | null>(null);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -85,65 +83,6 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
-
-  // Real-time subscription for agent intervention detection
-  useEffect(() => {
-    if (!bot || !visible || !currentSessionId) return;
-
-    console.log('🔄 Setting up real-time agent intervention detection for chatbot:', bot.id);
-
-    // Generate conversation ID for this session
-    const conversationId = generateSimpleHash(`${bot.id}_session_${currentSessionId}`);
-
-    // Subscribe to conversation_agents table changes for this specific conversation
-    const agentSubscription = supabase
-      .channel(`agent-intervention-${conversationId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'conversation_agents',
-          filter: `conversation_id=eq.${conversationId}`,
-        },
-        async (payload) => {
-          console.log('🔔 Agent intervention detected:', payload.new);
-          
-          // Fetch agent details
-          const { data: agent, error: agentError } = await supabase
-            .from('agents')
-            .select('name')
-            .eq('id', payload.new.agent_id)
-            .single();
-
-          if (!agentError && agent) {
-            setAgentInterventionDetected(true);
-            setCurrentAgentName(agent.name);
-            console.log('✅ Agent intervention UI updated:', agent.name);
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'DELETE',
-          schema: 'public',
-          table: 'conversation_agents',
-          filter: `conversation_id=eq.${conversationId}`,
-        },
-        () => {
-          console.log('🤖 Agent handed conversation back to bot');
-          setAgentInterventionDetected(false);
-          setCurrentAgentName(null);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      console.log('🔄 Cleaning up agent intervention subscription');
-      agentSubscription.unsubscribe();
-    };
-  }, [bot?.id, visible, currentSessionId]);
 
   // Real-time subscription for messages
   useEffect(() => {
@@ -555,6 +494,10 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   const botImage = safeConfig.botImage;
   const useCustomImage = safeConfig.useCustomImage && botImage;
 
+  // Check for agent intervention from props
+  const agentInterventionDetected = bot?.agentInterventionDetected || agentTakenOver;
+  const currentAgentName = bot?.currentAgentName || assignedAgent?.name;
+
   // Determine container classes based on fullscreen state and embedded mode
   const containerClasses = embedded 
     ? "w-full h-full min-h-screen" 
@@ -596,8 +539,8 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
               <div className="flex items-center space-x-1">
                 <div className="w-2 h-2 bg-green-500 rounded-full"></div>
                 <p className="text-xs text-slate-500">
-                  {agentTakenOver || agentInterventionDetected ? 
-                    `Agent: ${assignedAgent?.name || currentAgentName || 'Human Agent'}` : 
+                  {agentInterventionDetected ? 
+                    `Agent: ${currentAgentName || 'Human Agent'}` : 
                     'Online'
                   }
                   {embedded ? '' : ' • Preview Mode'}
@@ -641,12 +584,12 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
         {!isMinimized && (
           <>
             {/* Agent Takeover Notice */}
-            {(agentTakenOver || agentInterventionDetected) && (
+            {agentInterventionDetected && (
               <div className="p-3 bg-green-50 border-b border-green-200">
                 <div className="flex items-center space-x-2">
                   <User className="w-4 h-4 text-green-600" />
                   <span className="text-sm text-green-700 font-medium">
-                    Connected to {assignedAgent?.name || currentAgentName || 'Human Agent'} (Human Agent)
+                    Connected to {currentAgentName || 'Human Agent'} (Human Agent)
                   </span>
                 </div>
               </div>
@@ -855,18 +798,18 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
                       value={inputText}
                       onChange={(e) => setInputText(e.target.value)}
                       onKeyPress={handleKeyPress}
-                      placeholder={agentTakenOver || agentInterventionDetected ? "Agent is handling this conversation..." : "Type your message..."}
+                      placeholder={agentInterventionDetected ? "Agent is handling this conversation..." : "Type your message..."}
                       className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:border-transparent outline-none text-sm resize-none"
                       style={{ focusRingColor: primaryColor }}
                       rows={1}
-                      disabled={isTyping || agentTakenOver || agentInterventionDetected}
+                      disabled={isTyping || agentInterventionDetected}
                     />
                   </div>
                   <div className="flex items-center space-x-1">
                     <button 
                       className="p-2 text-slate-400 hover:text-slate-600 transition-colors"
                       title="Attach file"
-                      disabled={isTyping || agentTakenOver || agentInterventionDetected}
+                      disabled={isTyping || agentInterventionDetected}
                     >
                       <Paperclip className="w-4 h-4" />
                     </button>
@@ -874,7 +817,7 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
                       onClick={handleSendMessage}
                       className="p-2 text-white rounded-lg transition-colors disabled:opacity-50"
                       style={{ backgroundColor: primaryColor }}
-                      disabled={!inputText.trim() || isTyping || agentTakenOver || agentInterventionDetected}
+                      disabled={!inputText.trim() || isTyping || agentInterventionDetected}
                       title="Send message"
                     >
                       <Send className="w-4 h-4" />
@@ -887,14 +830,14 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
                     <div className="flex items-center space-x-4">
                       <button
                         onClick={isRecording ? stopRecording : startRecording}
-                        disabled={isProcessingVoice || !OPENAI_API_KEY || !microphoneSupported || agentTakenOver || agentInterventionDetected}
+                        disabled={isProcessingVoice || !OPENAI_API_KEY || !microphoneSupported || agentInterventionDetected}
                         className={`p-4 rounded-full transition-all duration-200 ${
                           isRecording 
                             ? 'bg-red-500 hover:bg-red-600 text-white shadow-lg scale-110' 
                             : 'bg-blue-500 hover:bg-blue-600 text-white shadow-md'
                         } disabled:opacity-50 disabled:cursor-not-allowed`}
                         title={
-                          agentTakenOver || agentInterventionDetected
+                          agentInterventionDetected
                             ? 'Agent is handling this conversation'
                             : !microphoneSupported 
                             ? 'Microphone not supported or permission denied'
@@ -921,7 +864,7 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
 
                   <div className="text-center">
                     <p className="text-xs text-slate-500">
-                      {agentTakenOver || agentInterventionDetected
+                      {agentInterventionDetected
                         ? 'Agent is handling this conversation'
                         : !microphoneSupported
                         ? 'Voice features require HTTPS and microphone permissions'
@@ -937,7 +880,7 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
               
               <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
                 <div className="flex items-center space-x-2">
-                  {bot?.knowledge_base_id && !(agentTakenOver || agentInterventionDetected) && (
+                  {bot?.knowledge_base_id && !agentInterventionDetected && (
                     <div className="flex items-center space-x-1">
                       <Brain className="w-3 h-3 text-purple-500" />
                       <span className="text-purple-600">Knowledge base connected</span>
@@ -949,7 +892,7 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
                       <span className="text-blue-600">Voice AI enabled</span>
                     </div>
                   )}
-                  {(agentTakenOver || agentInterventionDetected) && (
+                  {agentInterventionDetected && (
                     <div className="flex items-center space-x-1">
                       <User className="w-3 h-3 text-green-500" />
                       <span className="text-green-600">Human agent active</span>
