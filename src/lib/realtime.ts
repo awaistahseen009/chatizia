@@ -24,16 +24,24 @@ class RealtimeService {
     return RealtimeService.instance;
   }
 
-  // Helper function to generate conversation ID hash
+  // Helper function to generate proper UUID from chatbot and session
   private generateConversationId(chatbotId: string, sessionId: string): string {
+    // Create a deterministic UUID based on chatbot ID and session ID
+    const combined = `${chatbotId}_session_${sessionId}`;
+    
+    // Use a simple hash to create a consistent UUID
     let hash = 0;
-    const text = `${chatbotId}_session_${sessionId}`;
-    for (let i = 0; i < text.length; i++) {
-      const char = text.charCodeAt(i);
+    for (let i = 0; i < combined.length; i++) {
+      const char = combined.charCodeAt(i);
       hash = ((hash << 5) - hash) + char;
       hash = hash & hash; // Convert to 32-bit integer
     }
-    return Math.abs(hash).toString(36);
+    
+    // Convert to a proper UUID format
+    const hashStr = Math.abs(hash).toString(16).padStart(8, '0');
+    const uuid = `${hashStr.substring(0, 8)}-${hashStr.substring(0, 4)}-4${hashStr.substring(1, 4)}-8${hashStr.substring(0, 3)}-${hashStr}${hashStr}`.substring(0, 36);
+    
+    return uuid;
   }
 
   // Subscribe to agent intervention events

@@ -64,17 +64,6 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
   const VOICE_ID = '56AoDkrOh6qfVPDXZ7Pt';
 
-  // Helper function to generate simple hash for conversation IDs
-  const generateSimpleHash = (text: string): string => {
-    let hash = 0;
-    for (let i = 0; i < text.length; i++) {
-      const char = text.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32-bit integer
-    }
-    return Math.abs(hash).toString(36);
-  };
-
   // Auto-scroll to bottom when new messages arrive
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -90,19 +79,16 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
 
     console.log('🔄 Setting up real-time message subscription for chatbot:', bot.id);
 
-    // Generate conversation ID for this session
-    const conversationId = generateSimpleHash(`${bot.id}_session_${currentSessionId}`);
-
     // Subscribe to messages for this specific conversation
     const messageSubscription = supabase
-      .channel(`chatbot-messages-${conversationId}`)
+      .channel(`chatbot-messages-${currentSessionId}`)
       .on(
         'postgres_changes',
         {
           event: 'INSERT',
           schema: 'public',
           table: 'messages',
-          filter: `conversation_id=eq.${conversationId}`,
+          filter: `conversation_id=eq.${currentSessionId}`,
         },
         (payload) => {
           console.log('💬 New message received in chatbot preview:', payload.new);
@@ -179,8 +165,12 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   useEffect(() => {
     if (bot && visible) {
       initializeChat();
-      // Generate session ID when chat initializes
-      if (!currentSessionId) {
+      // Use session ID from props if available (for embedded mode)
+      if (bot.currentSessionId && !currentSessionId) {
+        setCurrentSessionId(bot.currentSessionId);
+        console.log('🔄 Using session ID from props:', bot.currentSessionId);
+      } else if (!currentSessionId) {
+        // Generate session ID when chat initializes
         const sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2)}`;
         setCurrentSessionId(sessionId);
         console.log('🔄 Generated session ID:', sessionId);
@@ -919,5 +909,3 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
     </div>
   );
 };
-
-export default ChatbotPreview;

@@ -90,12 +90,13 @@ const ChatbotEmbed: React.FC = () => {
         };
 
         console.log('✅ Chatbot data loaded:', safeChatbot.name);
-        setChatbot(safeChatbot);
-
+        
         // Generate session ID for this chat session
         const sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2)}`;
         setCurrentSessionId(sessionId);
         console.log('🔄 Generated session ID:', sessionId);
+        
+        setChatbot(safeChatbot);
 
         // Validate domain security if token is provided
         if (token) {
@@ -253,5 +254,3 @@ const ChatbotEmbed: React.FC = () => {
     </div>
   );
 };
-
-export default ChatbotEmbed;

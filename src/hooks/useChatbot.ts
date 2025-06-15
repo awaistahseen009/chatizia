@@ -24,15 +24,24 @@ export const useChatbot = (chatbot: Chatbot | null) => {
   const [assignedAgent, setAssignedAgent] = useState<any>(null);
   const { fetchSimilarChunks } = useDocuments();
 
-  // Helper function to generate a simple hash (avoiding crypto.subtle.digest issues)
-  const generateSimpleHash = (text: string): string => {
+  // Helper function to generate a proper UUID from chatbot and session
+  const generateConversationId = (chatbotId: string, sessionId: string): string => {
+    // Create a deterministic UUID based on chatbot ID and session ID
+    const combined = `${chatbotId}_session_${sessionId}`;
+    
+    // Use a simple hash to create a consistent UUID
     let hash = 0;
-    for (let i = 0; i < text.length; i++) {
-      const char = text.charCodeAt(i);
+    for (let i = 0; i < combined.length; i++) {
+      const char = combined.charCodeAt(i);
       hash = ((hash << 5) - hash) + char;
       hash = hash & hash; // Convert to 32-bit integer
     }
-    return Math.abs(hash).toString(36);
+    
+    // Convert to a proper UUID format
+    const hashStr = Math.abs(hash).toString(16).padStart(8, '0');
+    const uuid = `${hashStr.substring(0, 8)}-${hashStr.substring(0, 4)}-4${hashStr.substring(1, 4)}-8${hashStr.substring(0, 3)}-${hashStr}${hashStr}`.substring(0, 36);
+    
+    return uuid;
   };
 
   // Check if conversation has been taken over by an agent
@@ -46,7 +55,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
     if (!currentSessionId || !chatbot) return;
 
     try {
-      const conversationId = generateSimpleHash(`${chatbot.id}_session_${currentSessionId}`);
+      const conversationId = generateConversationId(chatbot.id, currentSessionId);
       
       // First check if we have a conversation record for this session
       const { data: conversation } = await supabase
@@ -80,21 +89,6 @@ export const useChatbot = (chatbot: Chatbot | null) => {
         setAgentTakenOver(true);
         setAssignedAgent(agentAssignment.agents);
         
-        // Add agent takeover message if not already added
-        setMessages(prev => {
-          const hasAgentMessage = prev.some(msg => msg.id.startsWith('agent-takeover'));
-          if (!hasAgentMessage) {
-            const agentMessage: ChatbotMessage = {
-              id: `agent-takeover-${Date.now()}`,
-              text: `Hello! I'm ${agentAssignment.agents.name}, a human agent. I've taken over this conversation to provide you with personalized assistance. How can I help you?`,
-              sender: 'agent',
-              timestamp: new Date(),
-            };
-            return [...prev, agentMessage];
-          }
-          return prev;
-        });
-        
         // Set up real-time subscription for this conversation
         realtimeService.subscribeNewMessage(conversationId, (data) => {
           if (data.message.is_agent_message) {
@@ -113,12 +107,30 @@ export const useChatbot = (chatbot: Chatbot | null) => {
             });
           }
         });
+        
+        // Add agent takeover message if not already added
+        setMessages(prev => {
+          const hasAgentMessage = prev.some(msg => msg.id.startsWith('agent-takeover'));
+          if (!hasAgentMessage) {
+            const agentMessage: ChatbotMessage = {
+              id: `agent-takeover-${Date.now()}`,
+              text: `Hello! I'm ${agentAssignment.agents.name}, a human agent. I've taken over this conversation to provide you with personalized assistance. How can I help you?`,
+              sender: 'agent',
+              timestamp: new Date(),
+            };
+            return [...prev, agentMessage];
+          }
+          return prev;
+        });
       } else {
         // Check if agent was removed (handed back to bot)
         if (agentTakenOver) {
           console.log('🤖 Conversation handed back to bot');
           setAgentTakenOver(false);
           setAssignedAgent(null);
+          
+          // Unsubscribe from real-time updates
+          realtimeService.unsubscribe(`messages-${conversationId}`);
           
           // Add handback message
           const handbackMessage: ChatbotMessage = {
@@ -128,9 +140,6 @@ export const useChatbot = (chatbot: Chatbot | null) => {
             timestamp: new Date(),
           };
           setMessages(prev => [...prev, handbackMessage]);
-          
-          // Unsubscribe from real-time updates
-          realtimeService.unsubscribe(`messages-${conversationId}`);
         }
       }
     } catch (error) {
@@ -325,7 +334,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
       }
 
       // Get the conversation ID for this session
-      const conversationId = generateSimpleHash(`${chatbot?.id}_session_${sessionId}`);
+      const conversationId = generateConversationId(chatbot?.id!, sessionId);
 
       // Create notification for the agent
       const { error: notificationError } = await supabase
