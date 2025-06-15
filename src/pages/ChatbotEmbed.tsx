@@ -149,21 +149,8 @@ const ChatbotEmbed: React.FC = () => {
 
     console.log('🔄 Setting up real-time agent intervention detection for chatbot:', chatbotId);
 
-    // Generate conversation ID for this session
-    const generateSimpleHash = (text: string): string => {
-      let hash = 0;
-      for (let i = 0; i < text.length; i++) {
-        const char = text.charCodeAt(i);
-        hash = ((hash << 5) - hash) + char;
-        hash = hash & hash; // Convert to 32-bit integer
-      }
-      return Math.abs(hash).toString(36);
-    };
-
-    const conversationId = generateSimpleHash(`${chatbotId}_session_${currentSessionId}`);
-
     // Subscribe to agent intervention events
-    realtimeService.subscribeAgentIntervention(conversationId, (data) => {
+    realtimeService.subscribeToSessionAgentIntervention(chatbotId, currentSessionId, (data) => {
       if (data.agent) {
         console.log('🔔 Agent intervention detected in embed:', data.agent.name);
         setAgentInterventionDetected(true);
@@ -177,7 +164,7 @@ const ChatbotEmbed: React.FC = () => {
 
     return () => {
       console.log('🔄 Cleaning up agent intervention subscription');
-      realtimeService.unsubscribe(`agent-intervention-${conversationId}`);
+      realtimeService.unsubscribeAll();
     };
   }, [chatbotId, currentSessionId]);
 

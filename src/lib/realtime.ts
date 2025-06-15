@@ -24,6 +24,18 @@ class RealtimeService {
     return RealtimeService.instance;
   }
 
+  // Helper function to generate conversation ID hash
+  private generateConversationId(chatbotId: string, sessionId: string): string {
+    let hash = 0;
+    const text = `${chatbotId}_session_${sessionId}`;
+    for (let i = 0; i < text.length; i++) {
+      const char = text.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash).toString(36);
+  }
+
   // Subscribe to agent intervention events
   public subscribeAgentIntervention(
     conversationId: string,
@@ -220,6 +232,64 @@ class RealtimeService {
       console.error('Failed to toggle knowledge base:', err);
       throw err;
     }
+  }
+
+  // Subscribe to messages for a chatbot session (for embedded chatbots)
+  public subscribeToSessionMessages(
+    chatbotId: string,
+    sessionId: string,
+    callback: (message: any) => void
+  ): void {
+    const conversationId = this.generateConversationId(chatbotId, sessionId);
+    const channelName = `session-messages-${conversationId}`;
+    
+    if (this.channels.has(channelName)) {
+      console.log(`🔌 Already subscribed to ${channelName}`);
+      return;
+    }
+
+    const channel = this.supabase
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `conversation_id=eq.${conversationId}`,
+        },
+        (payload) => {
+          console.log('💬 New session message received:', payload.new);
+          
+          // Only process assistant messages (bot or agent responses)
+          if (payload.new.role === 'assistant') {
+            const message = {
+              id: payload.new.id,
+              text: payload.new.content,
+              sender: payload.new.agent_id ? 'agent' : 'bot',
+              timestamp: new Date(payload.new.created_at),
+              agent_id: payload.new.agent_id,
+            };
+            
+            callback(message);
+          }
+        }
+      )
+      .subscribe((status) => {
+        console.log(`📡 Session messages channel ${channelName} status: ${status}`);
+      });
+
+    this.channels.set(channelName, channel);
+  }
+
+  // Subscribe to agent intervention for a chatbot session (for embedded chatbots)
+  public subscribeToSessionAgentIntervention(
+    chatbotId: string,
+    sessionId: string,
+    callback: (data: { agent: any }) => void
+  ): void {
+    const conversationId = this.generateConversationId(chatbotId, sessionId);
+    this.subscribeAgentIntervention(conversationId, callback);
   }
 }
 
