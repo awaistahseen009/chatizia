@@ -22,6 +22,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
   const [isEscalated, setIsEscalated] = useState(false);
   const [agentTakenOver, setAgentTakenOver] = useState(false);
   const [assignedAgent, setAssignedAgent] = useState<any>(null);
+  const [knowledgeBaseEnabled, setKnowledgeBaseEnabled] = useState(true);
   const { fetchSimilarChunks } = useDocuments();
 
   // Helper function to generate a proper UUID v4
@@ -111,7 +112,8 @@ export const useChatbot = (chatbot: Chatbot | null) => {
         .from('conversation_agents')
         .select(`
           *,
-          agents(*)
+          agents(*),
+          knowledge_base_enabled
         `)
         .eq('conversation_id', actualConversationId)
         .maybeSingle();
@@ -126,9 +128,11 @@ export const useChatbot = (chatbot: Chatbot | null) => {
         console.log('🤝 Agent has taken over conversation:', agentAssignment.agents.name);
         setAgentTakenOver(true);
         setAssignedAgent(agentAssignment.agents);
+        setKnowledgeBaseEnabled(agentAssignment.knowledge_base_enabled || false);
         
         // Set up real-time subscription for this conversation
         realtimeService.subscribeNewMessage(actualConversationId, (data) => {
+          console.log('💬 Real-time message received:', data.message);
           if (data.message.role === 'assistant' && data.message.agent_id) {
             const newMessage: ChatbotMessage = {
               id: data.message.id,
@@ -166,6 +170,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
           console.log('🤖 Conversation handed back to bot');
           setAgentTakenOver(false);
           setAssignedAgent(null);
+          setKnowledgeBaseEnabled(true); // Re-enable knowledge base
           
           // Unsubscribe from real-time updates
           realtimeService.unsubscribe(`messages-${actualConversationId}`);
@@ -297,8 +302,8 @@ export const useChatbot = (chatbot: Chatbot | null) => {
       let context = '';
       let sources: string[] = [];
 
-      // If chatbot has a knowledge base, search for relevant chunks
-      if (chatbot.knowledge_base_id) {
+      // If chatbot has a knowledge base AND knowledge base is enabled, search for relevant chunks
+      if (chatbot.knowledge_base_id && knowledgeBaseEnabled) {
         console.log('🔍 Searching knowledge base for relevant content...');
         const similarChunks = await fetchSimilarChunks(userMessage, 3, chatbot.id);
         
@@ -312,6 +317,8 @@ export const useChatbot = (chatbot: Chatbot | null) => {
         } else {
           console.log('ℹ️ No relevant chunks found in knowledge base');
         }
+      } else if (!knowledgeBaseEnabled) {
+        console.log('🚫 Knowledge base disabled - agent has taken over');
       }
 
       // Prepare chat history for context
@@ -444,6 +451,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
     setIsEscalated(false);
     setAgentTakenOver(false);
     setAssignedAgent(null);
+    setKnowledgeBaseEnabled(true);
   };
 
   const clearChat = () => {
@@ -453,6 +461,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
     setIsEscalated(false);
     setAgentTakenOver(false);
     setAssignedAgent(null);
+    setKnowledgeBaseEnabled(true);
   };
 
   return {
@@ -462,6 +471,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
     isEscalated,
     agentTakenOver,
     assignedAgent,
+    knowledgeBaseEnabled,
     sendMessage,
     initializeChat,
     clearChat,

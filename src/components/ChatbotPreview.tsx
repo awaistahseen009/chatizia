@@ -39,7 +39,7 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   }
 
   const bot = propChatbot || selectedBot;
-  const { messages: hookMessages, isTyping, sendMessage, initializeChat, agentTakenOver, assignedAgent } = useChatbot(bot);
+  const { messages: hookMessages, isTyping, sendMessage, initializeChat, agentTakenOver, assignedAgent, knowledgeBaseEnabled } = useChatbot(bot);
   const [inputText, setInputText] = useState('');
   const [isMinimized, setIsMinimized] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -79,16 +79,31 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
 
     console.log('🔄 Setting up real-time message subscription for chatbot:', bot.id);
 
+    // Generate conversation ID from chatbot and session
+    const generateConversationId = (chatbotId: string, sessionId: string): string => {
+      const combined = `${chatbotId}_${sessionId}`;
+      let hash = 0;
+      for (let i = 0; i < combined.length; i++) {
+        const char = combined.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash;
+      }
+      const hashHex = Math.abs(hash).toString(16).padStart(8, '0');
+      return `${hashHex.substring(0, 8)}-${hashHex.substring(0, 4)}-4${hashHex.substring(1, 4)}-8${hashHex.substring(0, 3)}-${hashHex}${hashHex}`.substring(0, 36);
+    };
+
+    const conversationId = generateConversationId(bot.id, currentSessionId);
+
     // Subscribe to messages for this specific conversation
     const messageSubscription = supabase
-      .channel(`chatbot-messages-${currentSessionId}`)
+      .channel(`chatbot-messages-${conversationId}`)
       .on(
         'postgres_changes',
         {
           event: 'INSERT',
           schema: 'public',
           table: 'messages',
-          filter: `conversation_id=eq.${currentSessionId}`,
+          filter: `conversation_id=eq.${conversationId}`,
         },
         (payload) => {
           console.log('💬 New message received in chatbot preview:', payload.new);
@@ -535,7 +550,7 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
                   }
                   {embedded ? '' : ' • Preview Mode'}
                 </p>
-                {bot?.knowledge_base_id && (
+                {bot?.knowledge_base_id && knowledgeBaseEnabled && (
                   <div className="flex items-center space-x-1 ml-2">
                     <Brain className="w-3 h-3 text-purple-500" />
                     <span className="text-xs text-purple-600">KB</span>
@@ -582,6 +597,11 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
                     Connected to {currentAgentName || 'Human Agent'} (Human Agent)
                   </span>
                 </div>
+                {!knowledgeBaseEnabled && (
+                  <p className="text-xs text-green-600 mt-1">
+                    Knowledge base disabled - agent handling conversation
+                  </p>
+                )}
               </div>
             )}
 
@@ -714,7 +734,7 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
                         <p className="text-sm whitespace-pre-wrap">{message.text}</p>
                       )}
                       
-                      {message.sources && message.sources.length > 0 && (
+                      {message.sources && message.sources.length > 0 && knowledgeBaseEnabled && (
                         <div className="mt-2 pt-2 border-t border-slate-200">
                           <div className="flex items-center space-x-1 text-xs text-slate-500">
                             <Brain className="w-3 h-3" />
@@ -870,7 +890,7 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
               
               <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
                 <div className="flex items-center space-x-2">
-                  {bot?.knowledge_base_id && !agentInterventionDetected && (
+                  {bot?.knowledge_base_id && knowledgeBaseEnabled && !agentInterventionDetected && (
                     <div className="flex items-center space-x-1">
                       <Brain className="w-3 h-3 text-purple-500" />
                       <span className="text-purple-600">Knowledge base connected</span>

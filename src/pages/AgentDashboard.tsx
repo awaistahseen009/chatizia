@@ -49,7 +49,7 @@ interface AgentMessage {
   content: string;
   role: 'user' | 'assistant' | 'agent';
   created_at: string;
-  is_agent_message?: boolean;
+  agent_id?: string;
 }
 
 const AgentDashboard: React.FC = () => {
@@ -67,7 +67,7 @@ const AgentDashboard: React.FC = () => {
   const [sendingMessage, setSendingMessage] = useState(false);
   const [availableConversations, setAvailableConversations] = useState<any[]>([]);
   const [showManualIntervention, setShowManualIntervention] = useState(false);
-  const [useKnowledgeBase, setUseKnowledgeBase] = useState(true);
+  const [useKnowledgeBase, setUseKnowledgeBase] = useState(false);
   const [sendingWithKB, setSendingWithKB] = useState(false);
   const [handBackToBot, setHandBackToBot] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -210,7 +210,8 @@ const AgentDashboard: React.FC = () => {
             messages: messages || [],
             lastMessage: messages?.[0]?.content || 'No messages yet',
             lastMessageTime: messages?.[0]?.created_at || conversation.created_at,
-            messageCount: count || 0
+            messageCount: count || 0,
+            knowledge_base_enabled: ca.knowledge_base_enabled
           };
         })
       );
@@ -308,15 +309,20 @@ const AgentDashboard: React.FC = () => {
 
       if (error) throw error;
       
-      // Transform messages to include agent message detection
-      const transformedMessages: AgentMessage[] = (data || []).map(msg => ({
-        ...msg,
-        is_agent_message: msg.role === 'assistant' && msg.agent_id,
-        role: msg.role as 'user' | 'assistant' | 'agent'
-      }));
+      console.log('📥 Fetched messages:', data?.length || 0);
+      setMessages(data || []);
 
-      console.log('📥 Fetched messages:', transformedMessages.length);
-      setMessages(transformedMessages);
+      // Check knowledge base status for this conversation
+      const { data: agentData } = await supabase
+        .from('conversation_agents')
+        .select('knowledge_base_enabled')
+        .eq('conversation_id', conversationId)
+        .eq('agent_id', currentAgent!.id)
+        .single();
+
+      if (agentData) {
+        setUseKnowledgeBase(agentData.knowledge_base_enabled || false);
+      }
     } catch (err) {
       console.error('Failed to fetch messages:', err);
     }
@@ -365,10 +371,20 @@ const AgentDashboard: React.FC = () => {
 
       console.log('✅ Agent message sent successfully');
 
+      // Add message to local state immediately
+      const newMsg: AgentMessage = {
+        id: data.id,
+        content: newMessage.trim(),
+        role: 'assistant',
+        created_at: data.created_at,
+        agent_id: currentAgent!.id
+      };
+      
+      setMessages(prev => [...prev, newMsg]);
+
       // Clear the input
       setNewMessage('');
 
-      // The message will be added to the UI via real-time subscription
     } catch (err) {
       console.error('Failed to send message:', err);
       alert('Failed to send message');
@@ -434,15 +450,37 @@ const AgentDashboard: React.FC = () => {
 
       console.log('✅ Knowledge base response sent successfully');
 
+      // Add message to local state
+      const newMsg: AgentMessage = {
+        id: data.id,
+        content: response.message,
+        role: 'assistant',
+        created_at: data.created_at,
+        agent_id: currentAgent!.id
+      };
+      
+      setMessages(prev => [...prev, newMsg]);
+
       // Clear the input
       setNewMessage('');
 
-      // The message will be added to the UI via real-time subscription
     } catch (err) {
       console.error('Failed to send message with knowledge base:', err);
       alert('Failed to send message with knowledge base');
     } finally {
       setSendingWithKB(false);
+    }
+  };
+
+  const handleToggleKnowledgeBase = async () => {
+    if (!selectedConversation) return;
+
+    try {
+      const newValue = !useKnowledgeBase;
+      await realtimeService.toggleKnowledgeBase(selectedConversation, newValue);
+      setUseKnowledgeBase(newValue);
+    } catch (err) {
+      console.error('Failed to toggle knowledge base:', err);
     }
   };
 
@@ -801,6 +839,19 @@ const AgentDashboard: React.FC = () => {
                       <CheckCircle className="w-4 h-4" />
                       <span>Agent Connected</span>
                     </div>
+                    {hasKnowledgeBase && (
+                      <button
+                        onClick={handleToggleKnowledgeBase}
+                        className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
+                          useKnowledgeBase
+                            ? 'bg-purple-100 text-purple-700 hover:bg-purple-200'
+                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                        }`}
+                      >
+                        <Brain className="w-3 h-3 inline mr-1" />
+                        KB {useKnowledgeBase ? 'ON' : 'OFF'}
+                      </button>
+                    )}
                     <button
                       onClick={handleHandBackToBot}
                       disabled={handBackToBot}
@@ -827,9 +878,9 @@ const AgentDashboard: React.FC = () => {
                             <div className="flex items-start space-x-2 max-w-[70%]">
                               {message.role !== 'user' && (
                                 <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-medium flex-shrink-0 mt-1 ${
-                                  message.is_agent_message ? 'bg-green-600' : 'bg-blue-600'
+                                  message.agent_id ? 'bg-green-600' : 'bg-blue-600'
                                 }`}>
-                                  {message.is_agent_message ? (
+                                  {message.agent_id ? (
                                     <User className="w-4 h-4" />
                                   ) : (
                                     'AI'
@@ -840,7 +891,7 @@ const AgentDashboard: React.FC = () => {
                                 className={`px-4 py-2 rounded-lg ${
                                   message.role === 'user'
                                     ? 'bg-blue-600 text-white'
-                                    : message.is_agent_message
+                                    : message.agent_id
                                     ? 'bg-green-100 text-green-800 border border-green-200'
                                     : 'bg-slate-100 text-slate-800'
                                 }`}
@@ -850,13 +901,13 @@ const AgentDashboard: React.FC = () => {
                                   <p className={`text-xs ${
                                     message.role === 'user' 
                                       ? 'text-blue-100' 
-                                      : message.is_agent_message
+                                      : message.agent_id
                                       ? 'text-green-600'
                                       : 'text-slate-500'
                                   }`}>
                                     {new Date(message.created_at).toLocaleTimeString()}
                                   </p>
-                                  {message.is_agent_message && (
+                                  {message.agent_id && (
                                     <span className="text-xs text-green-600 font-medium ml-2">
                                       Agent
                                     </span>
@@ -912,7 +963,7 @@ const AgentDashboard: React.FC = () => {
                             </div>
                             <div className="flex items-center space-x-2">
                               <button
-                                onClick={() => setUseKnowledgeBase(false)}
+                                onClick={handleToggleKnowledgeBase}
                                 className="text-xs text-purple-600 hover:underline"
                               >
                                 Disable
@@ -929,7 +980,7 @@ const AgentDashboard: React.FC = () => {
                           </div>
                         ) : (
                           <button
-                            onClick={() => setUseKnowledgeBase(true)}
+                            onClick={handleToggleKnowledgeBase}
                             className="text-sm text-purple-600 hover:underline flex items-center space-x-1"
                           >
                             <Brain className="w-3 h-3" />
@@ -989,7 +1040,7 @@ const AgentDashboard: React.FC = () => {
                         </span>
                       </div>
                       <p className="text-sm text-slate-600 mb-3">
-                        Session: {conversation.session_id}
+                        Last message: {conversation.lastMessage}
                       </p>
                       <div className="flex items-center justify-between">
                         <div className="flex items-center space-x-2">
