@@ -255,4 +255,4 @@ const ChatbotEmbed: React.FC = () => {
   );
 };
 
-export default ChatbotEmbed
+export default ChatbotEmbed;
