@@ -86,7 +86,7 @@ const AgentDashboard: React.FC = () => {
 
     console.log('🔄 Setting up real-time subscriptions for conversation:', selectedConversation);
 
-    // Subscribe to new messages
+    // Subscribe to new messages in this conversation
     const messageChannel = supabase
       .channel(`agent-messages-${selectedConversation}`)
       .on(
