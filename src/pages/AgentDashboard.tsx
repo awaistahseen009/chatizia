@@ -25,7 +25,6 @@ import { useAgents } from '../hooks/useAgents';
 import { useDocuments } from '../hooks/useDocuments';
 import { generateChatResponse, ChatMessage } from '../lib/openai';
 import { supabase } from '../lib/supabase';
-import { realtimeService } from '../lib/realtime';
 
 interface AssignedConversation {
   id: string;
@@ -88,40 +87,67 @@ const AgentDashboard: React.FC = () => {
     console.log('🔄 Setting up real-time subscriptions for conversation:', selectedConversation);
 
     // Subscribe to new messages
-    realtimeService.subscribeNewMessage(selectedConversation, (data) => {
-      if (data.conversationId === selectedConversation) {
-        console.log('💬 New message received in agent dashboard:', data.message);
-        setMessages((prev) => {
-          const exists = prev.some((msg) => msg.id === data.message.id);
-          if (exists) return prev;
-          return [...prev, data.message];
-        });
-        
-        // Update conversation list
-        setConversations((prev) =>
-          prev.map((conv) =>
-            conv.id === selectedConversation
-              ? {
-                  ...conv,
-                  lastMessage: data.message.content,
-                  lastMessageTime: data.message.created_at,
-                  messageCount: (conv.messageCount || 0) + 1,
-                }
-              : conv
-          )
-        );
-      }
-    });
+    const messageChannel = supabase
+      .channel(`agent-messages-${selectedConversation}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `conversation_id=eq.${selectedConversation}`,
+        },
+        (payload) => {
+          console.log('💬 New message received in agent dashboard:', payload.new);
+          
+          setMessages((prev) => {
+            const exists = prev.some((msg) => msg.id === payload.new.id);
+            if (exists) return prev;
+            return [...prev, payload.new];
+          });
+          
+          // Update conversation list
+          setConversations((prev) =>
+            prev.map((conv) =>
+              conv.id === selectedConversation
+                ? {
+                    ...conv,
+                    lastMessage: payload.new.content,
+                    lastMessageTime: payload.new.created_at,
+                    messageCount: (conv.messageCount || 0) + 1,
+                  }
+                : conv
+            )
+          );
+        }
+      )
+      .subscribe((status) => {
+        console.log(`📡 Agent messages channel status: ${status}`);
+      });
 
     // Subscribe to knowledge base toggles
-    realtimeService.subscribeKnowledgeBaseToggle(selectedConversation, (data) => {
-      console.log('🧠 Knowledge base toggled:', data.enabled);
-      setUseKnowledgeBase(data.enabled);
-    });
+    const kbChannel = supabase
+      .channel(`agent-kb-${selectedConversation}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'conversation_agents',
+          filter: `conversation_id=eq.${selectedConversation}`,
+        },
+        (payload) => {
+          console.log('🧠 Knowledge base toggled:', payload.new.knowledge_base_enabled);
+          setUseKnowledgeBase(payload.new.knowledge_base_enabled || false);
+        }
+      )
+      .subscribe((status) => {
+        console.log(`📡 Agent KB channel status: ${status}`);
+      });
 
     return () => {
-      realtimeService.unsubscribe(`messages-${selectedConversation}`);
-      realtimeService.unsubscribe(`knowledge-base-${selectedConversation}`);
+      messageChannel.unsubscribe();
+      kbChannel.unsubscribe();
     };
   }, [selectedConversation, currentAgent]);
 
@@ -167,7 +193,6 @@ const AgentDashboard: React.FC = () => {
     return () => {
       conversationSubscription.unsubscribe();
       notificationSubscription.unsubscribe();
-      realtimeService.unsubscribeAll();
     };
   }, [currentAgent, navigate]);
 
@@ -371,18 +396,7 @@ const AgentDashboard: React.FC = () => {
 
       console.log('✅ Agent message sent successfully');
 
-      // Add message to local state immediately
-      const newMsg: AgentMessage = {
-        id: data.id,
-        content: newMessage.trim(),
-        role: 'assistant',
-        created_at: data.created_at,
-        agent_id: currentAgent!.id
-      };
-      
-      setMessages(prev => [...prev, newMsg]);
-
-      // Clear the input
+      // Clear the input - the real-time subscription will handle adding the message
       setNewMessage('');
 
     } catch (err) {
@@ -450,18 +464,7 @@ const AgentDashboard: React.FC = () => {
 
       console.log('✅ Knowledge base response sent successfully');
 
-      // Add message to local state
-      const newMsg: AgentMessage = {
-        id: data.id,
-        content: response.message,
-        role: 'assistant',
-        created_at: data.created_at,
-        agent_id: currentAgent!.id
-      };
-      
-      setMessages(prev => [...prev, newMsg]);
-
-      // Clear the input
+      // Clear the input - the real-time subscription will handle adding the message
       setNewMessage('');
 
     } catch (err) {
@@ -477,8 +480,17 @@ const AgentDashboard: React.FC = () => {
 
     try {
       const newValue = !useKnowledgeBase;
-      await realtimeService.toggleKnowledgeBase(selectedConversation, newValue);
+      
+      const { error } = await supabase
+        .from('conversation_agents')
+        .update({ knowledge_base_enabled: newValue })
+        .eq('conversation_id', selectedConversation)
+        .eq('agent_id', currentAgent!.id);
+
+      if (error) throw error;
+      
       setUseKnowledgeBase(newValue);
+      console.log(`🧠 Knowledge base ${newValue ? 'enabled' : 'disabled'}`);
     } catch (err) {
       console.error('Failed to toggle knowledge base:', err);
     }
@@ -545,7 +557,6 @@ const AgentDashboard: React.FC = () => {
 
       // Disable knowledge base when taking over
       setUseKnowledgeBase(false);
-      await realtimeService.toggleKnowledgeBase(conversationId, false);
 
       // Create notification
       const conversation = availableConversations.find(c => c.id === conversationId);

@@ -4,7 +4,6 @@ import { generateChatResponse, ChatMessage } from '../lib/openai';
 import { analyzeSentiment, SentimentResult } from '../lib/sentimentAnalysis';
 import { Chatbot } from '../lib/supabase';
 import { supabase } from '../lib/supabase';
-import { realtimeService } from '../lib/realtime';
 
 export interface ChatbotMessage {
   id: string;
@@ -23,6 +22,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
   const [agentTakenOver, setAgentTakenOver] = useState(false);
   const [assignedAgent, setAssignedAgent] = useState<any>(null);
   const [knowledgeBaseEnabled, setKnowledgeBaseEnabled] = useState(true);
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const { fetchSimilarChunks } = useDocuments();
 
   // Helper function to generate a proper UUID v4
@@ -54,126 +54,121 @@ export const useChatbot = (chatbot: Chatbot | null) => {
     return `${hashHex.substring(0, 8)}-${hashHex.substring(0, 4)}-4${hashHex.substring(1, 4)}-8${hashHex.substring(0, 3)}-${hashHex}${hashHex}`.substring(0, 36);
   };
 
-  // Check if conversation has been taken over by an agent
+  // Set up real-time subscriptions for messages and agent interventions
   useEffect(() => {
-    if (currentSessionId && chatbot) {
-      checkAgentTakeover();
-    }
-  }, [currentSessionId, chatbot]);
+    if (!chatbot || !currentSessionId || !currentConversationId) return;
 
-  const checkAgentTakeover = async () => {
-    if (!currentSessionId || !chatbot) return;
+    console.log('🔄 Setting up real-time subscriptions for conversation:', currentConversationId);
 
-    try {
-      const conversationId = generateConversationId(chatbot.id, currentSessionId);
-      
-      console.log('🔍 Checking agent takeover for conversation:', conversationId);
-
-      // First check if we have a conversation record for this session
-      const { data: conversation, error: convError } = await supabase
-        .from('conversations')
-        .select('id, chatbot_id, session_id')
-        .eq('chatbot_id', chatbot.id)
-        .eq('session_id', currentSessionId)
-        .maybeSingle();
-
-      if (convError && convError.code !== 'PGRST116') {
-        console.error('Error checking conversation:', convError);
-        return;
-      }
-
-      let actualConversationId = conversationId;
-
-      // If no conversation exists, create one
-      if (!conversation) {
-        console.log('🆕 Creating new conversation record');
-        const { data: newConv, error: createError } = await supabase
-          .from('conversations')
-          .insert({
-            id: conversationId,
-            chatbot_id: chatbot.id,
-            session_id: currentSessionId,
-            user_id: null // Anonymous conversation
-          })
-          .select()
-          .single();
-
-        if (createError) {
-          console.error('Error creating conversation:', createError);
-          return;
-        }
-        actualConversationId = newConv.id;
-      } else {
-        actualConversationId = conversation.id;
-      }
-
-      // Check for agent assignment
-      const { data: agentAssignment, error } = await supabase
-        .from('conversation_agents')
-        .select(`
-          *,
-          agents(*),
-          knowledge_base_enabled
-        `)
-        .eq('conversation_id', actualConversationId)
-        .maybeSingle();
-
-      // Don't log error if no assignment found - this is normal
-      if (error && error.code !== 'PGRST116') {
-        console.error('Error checking agent takeover:', error);
-        return;
-      }
-
-      if (agentAssignment) {
-        console.log('🤝 Agent has taken over conversation:', agentAssignment.agents.name);
-        setAgentTakenOver(true);
-        setAssignedAgent(agentAssignment.agents);
-        setKnowledgeBaseEnabled(agentAssignment.knowledge_base_enabled || false);
-        
-        // Set up real-time subscription for this conversation
-        realtimeService.subscribeNewMessage(actualConversationId, (data) => {
-          console.log('💬 Real-time message received:', data.message);
-          if (data.message.role === 'assistant' && data.message.agent_id) {
+    // Subscribe to new messages in this conversation
+    const messageChannel = supabase
+      .channel(`messages-${currentConversationId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `conversation_id=eq.${currentConversationId}`,
+        },
+        (payload) => {
+          console.log('💬 Real-time message received:', payload.new);
+          
+          // Only add assistant messages (bot or agent responses) to avoid duplicates
+          if (payload.new.role === 'assistant') {
             const newMessage: ChatbotMessage = {
-              id: data.message.id,
-              text: data.message.content,
-              sender: 'agent',
-              timestamp: new Date(data.message.created_at),
+              id: payload.new.id,
+              text: payload.new.content,
+              sender: payload.new.agent_id ? 'agent' : 'bot',
+              timestamp: new Date(payload.new.created_at),
             };
-            
+
             setMessages(prev => {
-              // Check if message already exists
+              // Check if message already exists to avoid duplicates
               const exists = prev.some(msg => msg.id === newMessage.id);
-              if (exists) return prev;
+              if (exists) {
+                console.log('💬 Message already exists, skipping duplicate');
+                return prev;
+              }
+              
+              console.log('💬 Adding new real-time message:', newMessage);
               return [...prev, newMessage];
             });
+
+            // Stop typing indicator when we receive a response
+            setIsTyping(false);
           }
-        });
-        
-        // Add agent takeover message if not already added
-        setMessages(prev => {
-          const hasAgentMessage = prev.some(msg => msg.id.startsWith('agent-takeover'));
-          if (!hasAgentMessage) {
+        }
+      )
+      .subscribe((status) => {
+        console.log(`📡 Messages channel status: ${status}`);
+      });
+
+    // Subscribe to agent interventions (conversation_agents table)
+    const agentChannel = supabase
+      .channel(`agent-intervention-${currentConversationId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'conversation_agents',
+          filter: `conversation_id=eq.${currentConversationId}`,
+        },
+        async (payload) => {
+          console.log('🔔 Agent intervention detected:', payload.new);
+          
+          try {
+            // Fetch agent details
+            const { data: agent, error } = await supabase
+              .from('agents')
+              .select('id, name, email, agent_id')
+              .eq('id', payload.new.agent_id)
+              .single();
+            
+            if (error) {
+              console.error('Failed to fetch agent:', error);
+              return;
+            }
+            
+            console.log('🤝 Agent has taken over conversation:', agent.name);
+            setAgentTakenOver(true);
+            setAssignedAgent(agent);
+            setKnowledgeBaseEnabled(payload.new.knowledge_base_enabled || false);
+            
+            // Add agent takeover message
             const agentMessage: ChatbotMessage = {
               id: `agent-takeover-${Date.now()}`,
-              text: `Hello! I'm ${agentAssignment.agents.name}, a human agent. I've taken over this conversation to provide you with personalized assistance. How can I help you?`,
+              text: `Hello! I'm ${agent.name}, a human agent. I've taken over this conversation to provide you with personalized assistance. How can I help you?`,
               sender: 'agent',
               timestamp: new Date(),
             };
-            return [...prev, agentMessage];
+            
+            setMessages(prev => {
+              const hasAgentMessage = prev.some(msg => msg.id.startsWith('agent-takeover'));
+              if (!hasAgentMessage) {
+                return [...prev, agentMessage];
+              }
+              return prev;
+            });
+          } catch (err) {
+            console.error('Error in agent intervention callback:', err);
           }
-          return prev;
-        });
-      } else {
-        // Check if agent was removed (handed back to bot)
-        if (agentTakenOver) {
-          console.log('🤖 Conversation handed back to bot');
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'conversation_agents',
+          filter: `conversation_id=eq.${currentConversationId}`,
+        },
+        () => {
+          console.log('🤖 Agent handed conversation back to bot');
           setAgentTakenOver(false);
           setAssignedAgent(null);
           setKnowledgeBaseEnabled(true); // Re-enable knowledge base
-          
-          // Unsubscribe from real-time updates
-          realtimeService.unsubscribe(`messages-${actualConversationId}`);
           
           // Add handback message
           const handbackMessage: ChatbotMessage = {
@@ -184,6 +179,62 @@ export const useChatbot = (chatbot: Chatbot | null) => {
           };
           setMessages(prev => [...prev, handbackMessage]);
         }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'conversation_agents',
+          filter: `conversation_id=eq.${currentConversationId}`,
+        },
+        (payload) => {
+          console.log('🧠 Knowledge base toggle detected:', payload.new);
+          setKnowledgeBaseEnabled(payload.new.knowledge_base_enabled || false);
+        }
+      )
+      .subscribe((status) => {
+        console.log(`📡 Agent intervention channel status: ${status}`);
+      });
+
+    return () => {
+      console.log('🔄 Cleaning up real-time subscriptions');
+      messageChannel.unsubscribe();
+      agentChannel.unsubscribe();
+    };
+  }, [chatbot?.id, currentSessionId, currentConversationId]);
+
+  // Check for existing agent intervention when conversation starts
+  const checkAgentTakeover = async (conversationId: string) => {
+    try {
+      console.log('🔍 Checking for existing agent takeover:', conversationId);
+
+      // Check for agent assignment
+      const { data: agentAssignment, error } = await supabase
+        .from('conversation_agents')
+        .select(`
+          *,
+          agents(*),
+          knowledge_base_enabled
+        `)
+        .eq('conversation_id', conversationId)
+        .maybeSingle();
+
+      if (error && error.code !== 'PGRST116') {
+        console.error('Error checking agent takeover:', error);
+        return;
+      }
+
+      if (agentAssignment) {
+        console.log('🤝 Existing agent takeover found:', agentAssignment.agents.name);
+        setAgentTakenOver(true);
+        setAssignedAgent(agentAssignment.agents);
+        setKnowledgeBaseEnabled(agentAssignment.knowledge_base_enabled || false);
+      } else {
+        console.log('🤖 No agent takeover detected');
+        setAgentTakenOver(false);
+        setAssignedAgent(null);
+        setKnowledgeBaseEnabled(true);
       }
     } catch (error) {
       console.error('Error checking agent takeover:', error);
@@ -215,6 +266,11 @@ export const useChatbot = (chatbot: Chatbot | null) => {
 
       // Generate conversation ID
       const conversationId = generateConversationId(chatbot.id, sessionId);
+      
+      // Set conversation ID if not already set
+      if (!currentConversationId) {
+        setCurrentConversationId(conversationId);
+      }
 
       // Ensure conversation exists
       const { data: existingConv } = await supabase
@@ -255,7 +311,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
       console.log('✅ User message stored successfully');
 
       // Check for agent takeover BEFORE processing sentiment or generating responses
-      await checkAgentTakeover();
+      await checkAgentTakeover(conversationId);
 
       // If agent has taken over, don't generate automatic responses or analyze sentiment
       if (agentTakenOver) {
@@ -339,18 +395,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
       console.log('🤖 Generating AI response...');
       const response = await generateChatResponse(chatHistory, context);
 
-      // Add bot response to UI
-      const botMessage: ChatbotMessage = {
-        id: `bot-${Date.now()}`,
-        text: response.message,
-        sender: 'bot',
-        timestamp: new Date(),
-        sources: response.sources || sources,
-      };
-
-      setMessages(prev => [...prev, botMessage]);
-
-      // Store bot message
+      // Store bot message first, then add to UI
       console.log('💾 Storing bot message...');
       const { data: botMessageData, error: botMessageError } = await supabase
         .from('messages')
@@ -369,6 +414,26 @@ export const useChatbot = (chatbot: Chatbot | null) => {
         console.log('✅ Bot response stored successfully');
       }
 
+      // The real-time subscription will handle adding the message to the UI
+      // But we'll add it locally as a fallback in case real-time is delayed
+      setTimeout(() => {
+        setMessages(prev => {
+          const exists = prev.some(msg => msg.id === botMessageData?.id);
+          if (!exists && botMessageData) {
+            const botMessage: ChatbotMessage = {
+              id: botMessageData.id,
+              text: response.message,
+              sender: 'bot',
+              timestamp: new Date(botMessageData.created_at),
+              sources: response.sources || sources,
+            };
+            return [...prev, botMessage];
+          }
+          return prev;
+        });
+        setIsTyping(false);
+      }, 1000); // 1 second fallback
+
     } catch (error) {
       console.error('❌ Error generating bot response:', error);
       
@@ -381,7 +446,6 @@ export const useChatbot = (chatbot: Chatbot | null) => {
       };
 
       setMessages(prev => [...prev, errorMessage]);
-    } finally {
       setIsTyping(false);
     }
   };
@@ -441,10 +505,16 @@ export const useChatbot = (chatbot: Chatbot | null) => {
     // Use session ID from props if available (for embedded mode)
     if (chatbot.currentSessionId) {
       setCurrentSessionId(chatbot.currentSessionId);
+      const conversationId = generateConversationId(chatbot.id, chatbot.currentSessionId);
+      setCurrentConversationId(conversationId);
       console.log('🔄 Using session ID from props:', chatbot.currentSessionId);
+      
+      // Check for existing agent takeover
+      checkAgentTakeover(conversationId);
     } else {
       // Reset session
       setCurrentSessionId(null);
+      setCurrentConversationId(null);
     }
     
     setSentimentHistory([]);
@@ -457,6 +527,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
   const clearChat = () => {
     setMessages([]);
     setCurrentSessionId(null);
+    setCurrentConversationId(null);
     setSentimentHistory([]);
     setIsEscalated(false);
     setAgentTakenOver(false);
