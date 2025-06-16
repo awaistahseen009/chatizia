@@ -24,12 +24,21 @@ export const useChatbot = (chatbot: Chatbot | null) => {
   const [assignedAgent, setAssignedAgent] = useState<any>(null);
   const { fetchSimilarChunks } = useDocuments();
 
-  // Helper function to generate a proper UUID from chatbot and session
+  // Helper function to generate a proper UUID v4
+  const generateUUID = (): string => {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      const r = Math.random() * 16 | 0;
+      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  };
+
+  // Helper function to generate conversation ID from chatbot and session
   const generateConversationId = (chatbotId: string, sessionId: string): string => {
-    // Create a deterministic UUID based on chatbot ID and session ID
-    const combined = `${chatbotId}_session_${sessionId}`;
+    // Create a deterministic conversation ID based on chatbot and session
+    const combined = `${chatbotId}_${sessionId}`;
     
-    // Use a simple hash to create a consistent UUID
+    // Use a simple hash to create a consistent identifier
     let hash = 0;
     for (let i = 0; i < combined.length; i++) {
       const char = combined.charCodeAt(i);
@@ -37,11 +46,11 @@ export const useChatbot = (chatbot: Chatbot | null) => {
       hash = hash & hash; // Convert to 32-bit integer
     }
     
-    // Convert to a proper UUID format
-    const hashStr = Math.abs(hash).toString(16).padStart(8, '0');
-    const uuid = `${hashStr.substring(0, 8)}-${hashStr.substring(0, 4)}-4${hashStr.substring(1, 4)}-8${hashStr.substring(0, 3)}-${hashStr}${hashStr}`.substring(0, 36);
+    // Convert to hex and pad to ensure consistent length
+    const hashHex = Math.abs(hash).toString(16).padStart(8, '0');
     
-    return uuid;
+    // Create a proper UUID v4 format using the hash
+    return `${hashHex.substring(0, 8)}-${hashHex.substring(0, 4)}-4${hashHex.substring(1, 4)}-8${hashHex.substring(0, 3)}-${hashHex}${hashHex}`.substring(0, 36);
   };
 
   // Check if conversation has been taken over by an agent
@@ -57,26 +66,55 @@ export const useChatbot = (chatbot: Chatbot | null) => {
     try {
       const conversationId = generateConversationId(chatbot.id, currentSessionId);
       
-      // First check if we have a conversation record for this session
-      const { data: conversation } = await supabase
-        .from('conversations')
-        .select('id')
-        .eq('id', conversationId)
-        .single();
+      console.log('🔍 Checking agent takeover for conversation:', conversationId);
 
-      if (!conversation) {
-        // No conversation record exists yet, so no agent takeover
+      // First check if we have a conversation record for this session
+      const { data: conversation, error: convError } = await supabase
+        .from('conversations')
+        .select('id, chatbot_id, session_id')
+        .eq('chatbot_id', chatbot.id)
+        .eq('session_id', currentSessionId)
+        .maybeSingle();
+
+      if (convError && convError.code !== 'PGRST116') {
+        console.error('Error checking conversation:', convError);
         return;
       }
 
+      let actualConversationId = conversationId;
+
+      // If no conversation exists, create one
+      if (!conversation) {
+        console.log('🆕 Creating new conversation record');
+        const { data: newConv, error: createError } = await supabase
+          .from('conversations')
+          .insert({
+            id: conversationId,
+            chatbot_id: chatbot.id,
+            session_id: currentSessionId,
+            user_id: null // Anonymous conversation
+          })
+          .select()
+          .single();
+
+        if (createError) {
+          console.error('Error creating conversation:', createError);
+          return;
+        }
+        actualConversationId = newConv.id;
+      } else {
+        actualConversationId = conversation.id;
+      }
+
+      // Check for agent assignment
       const { data: agentAssignment, error } = await supabase
         .from('conversation_agents')
         .select(`
           *,
           agents(*)
         `)
-        .eq('conversation_id', conversationId)
-        .single();
+        .eq('conversation_id', actualConversationId)
+        .maybeSingle();
 
       // Don't log error if no assignment found - this is normal
       if (error && error.code !== 'PGRST116') {
@@ -90,8 +128,8 @@ export const useChatbot = (chatbot: Chatbot | null) => {
         setAssignedAgent(agentAssignment.agents);
         
         // Set up real-time subscription for this conversation
-        realtimeService.subscribeNewMessage(conversationId, (data) => {
-          if (data.message.is_agent_message) {
+        realtimeService.subscribeNewMessage(actualConversationId, (data) => {
+          if (data.message.role === 'assistant' && data.message.agent_id) {
             const newMessage: ChatbotMessage = {
               id: data.message.id,
               text: data.message.content,
@@ -130,7 +168,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
           setAssignedAgent(null);
           
           // Unsubscribe from real-time updates
-          realtimeService.unsubscribe(`messages-${conversationId}`);
+          realtimeService.unsubscribe(`messages-${actualConversationId}`);
           
           // Add handback message
           const handbackMessage: ChatbotMessage = {
@@ -170,15 +208,39 @@ export const useChatbot = (chatbot: Chatbot | null) => {
         console.log('🔄 Created new session:', sessionId);
       }
 
-      // Store user message using session-based approach
-      console.log('💾 Storing user message with session ID...');
+      // Generate conversation ID
+      const conversationId = generateConversationId(chatbot.id, sessionId);
+
+      // Ensure conversation exists
+      const { data: existingConv } = await supabase
+        .from('conversations')
+        .select('id')
+        .eq('id', conversationId)
+        .maybeSingle();
+
+      if (!existingConv) {
+        console.log('🆕 Creating conversation record');
+        await supabase
+          .from('conversations')
+          .insert({
+            id: conversationId,
+            chatbot_id: chatbot.id,
+            session_id: sessionId,
+            user_id: null
+          });
+      }
+
+      // Store user message
+      console.log('💾 Storing user message...');
       const { data: userMessageData, error: userMessageError } = await supabase
-        .rpc('add_session_message', {
-          chatbot_id_param: chatbot.id,
-          session_id_param: sessionId,
-          content_param: userMessage,
-          role_param: 'user'
-        });
+        .from('messages')
+        .insert({
+          conversation_id: conversationId,
+          content: userMessage,
+          role: 'user'
+        })
+        .select()
+        .single();
 
       if (userMessageError) {
         console.error('❌ Failed to store user message:', userMessageError);
@@ -215,7 +277,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
         // Check if escalation is needed
         if (sentimentResult.shouldEscalate) {
           console.log('🚨 Escalating conversation to human agent...');
-          await escalateToHumanAgent(sessionId);
+          await escalateToHumanAgent(conversationId);
           setIsEscalated(true);
           
           // Add escalation message
@@ -238,7 +300,6 @@ export const useChatbot = (chatbot: Chatbot | null) => {
       // If chatbot has a knowledge base, search for relevant chunks
       if (chatbot.knowledge_base_id) {
         console.log('🔍 Searching knowledge base for relevant content...');
-        // Pass chatbot ID for public access in embedded mode
         const similarChunks = await fetchSimilarChunks(userMessage, 3, chatbot.id);
         
         if (similarChunks.length > 0) {
@@ -282,15 +343,17 @@ export const useChatbot = (chatbot: Chatbot | null) => {
 
       setMessages(prev => [...prev, botMessage]);
 
-      // Store bot message using session-based approach
-      console.log('💾 Storing bot message with session ID...');
+      // Store bot message
+      console.log('💾 Storing bot message...');
       const { data: botMessageData, error: botMessageError } = await supabase
-        .rpc('add_session_message', {
-          chatbot_id_param: chatbot.id,
-          session_id_param: sessionId,
-          content_param: response.message,
-          role_param: 'assistant'
-        });
+        .from('messages')
+        .insert({
+          conversation_id: conversationId,
+          content: response.message,
+          role: 'assistant'
+        })
+        .select()
+        .single();
 
       if (botMessageError) {
         console.error('❌ Failed to store bot message:', botMessageError);
@@ -316,7 +379,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
     }
   };
 
-  const escalateToHumanAgent = async (sessionId: string) => {
+  const escalateToHumanAgent = async (conversationId: string) => {
     try {
       // Find an available agent assigned to this chatbot
       const { data: assignments, error: assignmentError } = await supabase
@@ -332,9 +395,6 @@ export const useChatbot = (chatbot: Chatbot | null) => {
         console.log('⚠️ No agents assigned to this chatbot');
         return;
       }
-
-      // Get the conversation ID for this session
-      const conversationId = generateConversationId(chatbot?.id!, sessionId);
 
       // Create notification for the agent
       const { error: notificationError } = await supabase

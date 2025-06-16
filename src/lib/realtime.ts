@@ -24,12 +24,21 @@ class RealtimeService {
     return RealtimeService.instance;
   }
 
-  // Helper function to generate proper UUID from chatbot and session
+  // Helper function to generate proper UUID v4
+  private generateUUID(): string {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      const r = Math.random() * 16 | 0;
+      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  }
+
+  // Helper function to generate conversation ID from chatbot and session
   private generateConversationId(chatbotId: string, sessionId: string): string {
-    // Create a deterministic UUID based on chatbot ID and session ID
-    const combined = `${chatbotId}_session_${sessionId}`;
+    // Create a deterministic conversation ID based on chatbot and session
+    const combined = `${chatbotId}_${sessionId}`;
     
-    // Use a simple hash to create a consistent UUID
+    // Use a simple hash to create a consistent identifier
     let hash = 0;
     for (let i = 0; i < combined.length; i++) {
       const char = combined.charCodeAt(i);
@@ -37,11 +46,11 @@ class RealtimeService {
       hash = hash & hash; // Convert to 32-bit integer
     }
     
-    // Convert to a proper UUID format
-    const hashStr = Math.abs(hash).toString(16).padStart(8, '0');
-    const uuid = `${hashStr.substring(0, 8)}-${hashStr.substring(0, 4)}-4${hashStr.substring(1, 4)}-8${hashStr.substring(0, 3)}-${hashStr}${hashStr}`.substring(0, 36);
+    // Convert to hex and pad to ensure consistent length
+    const hashHex = Math.abs(hash).toString(16).padStart(8, '0');
     
-    return uuid;
+    // Create a proper UUID v4 format using the hash
+    return `${hashHex.substring(0, 8)}-${hashHex.substring(0, 4)}-4${hashHex.substring(1, 4)}-8${hashHex.substring(0, 3)}-${hashHex}${hashHex}`.substring(0, 36);
   }
 
   // Subscribe to agent intervention events

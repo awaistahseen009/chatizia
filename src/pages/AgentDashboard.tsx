@@ -72,17 +72,6 @@ const AgentDashboard: React.FC = () => {
   const [handBackToBot, setHandBackToBot] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Helper function to generate simple hash for conversation IDs
-  const generateSimpleHash = (text: string): string => {
-    let hash = 0;
-    for (let i = 0; i < text.length; i++) {
-      const char = text.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32-bit integer
-    }
-    return Math.abs(hash).toString(36);
-  };
-
   // Auto-scroll to bottom when new messages arrive
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -260,7 +249,7 @@ const AgentDashboard: React.FC = () => {
         .is('user_id', null) // Anonymous conversations
         .not('session_id', 'is', null) // Has session ID
         .order('updated_at', { ascending: false })
-        .limit(10);
+        .limit(20);
 
       if (conversations) {
         // Filter out conversations that already have an agent assigned
@@ -270,8 +259,36 @@ const AgentDashboard: React.FC = () => {
           .in('conversation_id', conversations.map(c => c.id));
 
         const assignedIds = new Set(assignedConversationIds?.map(ca => ca.conversation_id) || []);
-        const available = conversations.filter(c => !assignedIds.has(c.id));
+        
+        // Also check for recent message activity (last 30 minutes)
+        const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+        
+        const availableWithActivity = await Promise.all(
+          conversations
+            .filter(c => !assignedIds.has(c.id))
+            .map(async (conv) => {
+              // Check if there are recent messages
+              const { data: recentMessages, count } = await supabase
+                .from('messages')
+                .select('*', { count: 'exact' })
+                .eq('conversation_id', conv.id)
+                .gte('created_at', thirtyMinutesAgo)
+                .limit(1);
 
+              return {
+                ...conv,
+                hasRecentActivity: (count || 0) > 0,
+                lastMessage: recentMessages?.[0]?.content || 'No recent messages'
+              };
+            })
+        );
+
+        // Prioritize conversations with recent activity
+        const available = availableWithActivity
+          .filter(c => c.hasRecentActivity)
+          .slice(0, 10);
+
+        console.log('📋 Available conversations with recent activity:', available.length);
         setAvailableConversations(available);
       }
     } catch (err) {
@@ -329,17 +346,17 @@ const AgentDashboard: React.FC = () => {
     try {
       console.log('📤 Sending agent message...');
       
-      const conversation = conversations.find(c => c.id === selectedConversation);
-      
-      // Insert message with agent identification using RPC function
+      // Insert message with agent identification
       const { data, error } = await supabase
-        .rpc('add_session_message', {
-          chatbot_id_param: conversation?.chatbot_id,
-          session_id_param: conversation?.session_id,
-          content_param: newMessage.trim(),
-          role_param: 'assistant',
-          agent_id_param: currentAgent!.id
-        });
+        .from('messages')
+        .insert({
+          conversation_id: selectedConversation,
+          content: newMessage.trim(),
+          role: 'assistant',
+          agent_id: currentAgent!.id
+        })
+        .select()
+        .single();
 
       if (error) {
         console.error('❌ Failed to send agent message:', error);
@@ -398,15 +415,17 @@ const AgentDashboard: React.FC = () => {
       // Generate response using knowledge base
       const response = await generateChatResponse(recentMessages as ChatMessage[], context);
 
-      // Send the enhanced response with agent identification using RPC function
+      // Send the enhanced response with agent identification
       const { data, error } = await supabase
-        .rpc('add_session_message', {
-          chatbot_id_param: conversation.chatbot_id,
-          session_id_param: conversation.session_id,
-          content_param: response.message,
-          role_param: 'assistant',
-          agent_id_param: currentAgent!.id
-        });
+        .from('messages')
+        .insert({
+          conversation_id: selectedConversation,
+          content: response.message,
+          role: 'assistant',
+          agent_id: currentAgent!.id
+        })
+        .select()
+        .single();
 
       if (error) {
         console.error('❌ Failed to send knowledge base response:', error);
@@ -436,15 +455,14 @@ const AgentDashboard: React.FC = () => {
 
     setHandBackToBot(true);
     try {
-      // Send a handoff message first using RPC function
-      const conversation = conversations.find(c => c.id === selectedConversation);
+      // Send a handoff message first
       await supabase
-        .rpc('add_session_message', {
-          chatbot_id_param: conversation?.chatbot_id,
-          session_id_param: conversation?.session_id,
-          content_param: "Thank you for your patience. I'm handing you back to our AI assistant who can continue to help you with your questions.",
-          role_param: 'assistant',
-          agent_id_param: currentAgent!.id
+        .from('messages')
+        .insert({
+          conversation_id: selectedConversation,
+          content: "Thank you for your patience. I'm handing you back to our AI assistant who can continue to help you with your questions.",
+          role: 'assistant',
+          agent_id: currentAgent!.id
         });
 
       // Remove agent assignment from this conversation
@@ -501,14 +519,14 @@ const AgentDashboard: React.FC = () => {
         chatbot_name: conversation?.chatbots?.name
       });
 
-      // Send takeover message using RPC function
+      // Send takeover message
       await supabase
-        .rpc('add_session_message', {
-          chatbot_id_param: conversation?.chatbot_id,
-          session_id_param: conversation?.session_id,
-          content_param: `Hello! I'm ${currentAgent!.name}, a human agent. I've taken over this conversation to provide you with personalized assistance. How can I help you?`,
-          role_param: 'assistant',
-          agent_id_param: currentAgent!.id
+        .from('messages')
+        .insert({
+          conversation_id: conversationId,
+          content: `Hello! I'm ${currentAgent!.name}, a human agent. I've taken over this conversation to provide you with personalized assistance. How can I help you?`,
+          role: 'assistant',
+          agent_id: currentAgent!.id
         });
 
       console.log('✅ Successfully took over conversation');
