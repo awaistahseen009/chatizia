@@ -74,28 +74,29 @@ export const useChatbot = (chatbot: Chatbot | null) => {
         (payload) => {
           console.log('💬 Real-time message received:', payload.new);
           
-          // Only add assistant messages (bot or agent responses) to avoid duplicates
+          // Add ALL messages (user, bot, and agent) to avoid any timing issues
+          const newMessage: ChatbotMessage = {
+            id: payload.new.id,
+            text: payload.new.content,
+            sender: payload.new.role === 'user' ? 'user' : 
+                   payload.new.agent_id ? 'agent' : 'bot',
+            timestamp: new Date(payload.new.created_at),
+          };
+
+          setMessages(prev => {
+            // Check if message already exists to avoid duplicates
+            const exists = prev.some(msg => msg.id === newMessage.id);
+            if (exists) {
+              console.log('💬 Message already exists, skipping duplicate');
+              return prev;
+            }
+            
+            console.log('💬 Adding new real-time message:', newMessage);
+            return [...prev, newMessage];
+          });
+
+          // Stop typing indicator when we receive any response
           if (payload.new.role === 'assistant') {
-            const newMessage: ChatbotMessage = {
-              id: payload.new.id,
-              text: payload.new.content,
-              sender: payload.new.agent_id ? 'agent' : 'bot',
-              timestamp: new Date(payload.new.created_at),
-            };
-
-            setMessages(prev => {
-              // Check if message already exists to avoid duplicates
-              const exists = prev.some(msg => msg.id === newMessage.id);
-              if (exists) {
-                console.log('💬 Message already exists, skipping duplicate');
-                return prev;
-              }
-              
-              console.log('💬 Adding new real-time message:', newMessage);
-              return [...prev, newMessage];
-            });
-
-            // Stop typing indicator when we receive a response
             setIsTyping(false);
           }
         }
@@ -395,7 +396,7 @@ export const useChatbot = (chatbot: Chatbot | null) => {
       console.log('🤖 Generating AI response...');
       const response = await generateChatResponse(chatHistory, context);
 
-      // Store bot message first, then add to UI
+      // Store bot message first - the real-time subscription will handle adding it to UI
       console.log('💾 Storing bot message...');
       const { data: botMessageData, error: botMessageError } = await supabase
         .from('messages')
@@ -409,30 +410,39 @@ export const useChatbot = (chatbot: Chatbot | null) => {
 
       if (botMessageError) {
         console.error('❌ Failed to store bot message:', botMessageError);
-        // Don't throw error here as the user already sees the response
+        // Add fallback message if storage fails
+        const errorMessage: ChatbotMessage = {
+          id: `bot-error-${Date.now()}`,
+          text: response.message,
+          sender: 'bot',
+          timestamp: new Date(),
+          sources: response.sources || sources,
+        };
+        setMessages(prev => [...prev, errorMessage]);
+        setIsTyping(false);
       } else {
         console.log('✅ Bot response stored successfully');
+        // Real-time subscription will handle adding the message to UI
+        // Add a small timeout fallback in case real-time is delayed
+        setTimeout(() => {
+          setMessages(prev => {
+            const exists = prev.some(msg => msg.id === botMessageData.id);
+            if (!exists) {
+              console.log('⏰ Real-time delayed, adding bot message as fallback');
+              const botMessage: ChatbotMessage = {
+                id: botMessageData.id,
+                text: response.message,
+                sender: 'bot',
+                timestamp: new Date(botMessageData.created_at),
+                sources: response.sources || sources,
+              };
+              return [...prev, botMessage];
+            }
+            return prev;
+          });
+          setIsTyping(false);
+        }, 2000); // 2 second fallback
       }
-
-      // The real-time subscription will handle adding the message to the UI
-      // But we'll add it locally as a fallback in case real-time is delayed
-      setTimeout(() => {
-        setMessages(prev => {
-          const exists = prev.some(msg => msg.id === botMessageData?.id);
-          if (!exists && botMessageData) {
-            const botMessage: ChatbotMessage = {
-              id: botMessageData.id,
-              text: response.message,
-              sender: 'bot',
-              timestamp: new Date(botMessageData.created_at),
-              sources: response.sources || sources,
-            };
-            return [...prev, botMessage];
-          }
-          return prev;
-        });
-        setIsTyping(false);
-      }, 1000); // 1 second fallback
 
     } catch (error) {
       console.error('❌ Error generating bot response:', error);

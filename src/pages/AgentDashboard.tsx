@@ -100,9 +100,15 @@ const AgentDashboard: React.FC = () => {
         (payload) => {
           console.log('💬 New message received in agent dashboard:', payload.new);
           
+          // Add the message immediately to the UI
           setMessages((prev) => {
             const exists = prev.some((msg) => msg.id === payload.new.id);
-            if (exists) return prev;
+            if (exists) {
+              console.log('💬 Message already exists, skipping duplicate');
+              return prev;
+            }
+            
+            console.log('💬 Adding new real-time message to agent dashboard');
             return [...prev, payload.new];
           });
           
