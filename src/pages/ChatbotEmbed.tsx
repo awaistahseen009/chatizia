@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase';
 import { ChatbotSecurity } from '../lib/chatbotSecurity';
 import ChatbotPreview from '../components/ChatbotPreview';
 import LoadingSpinner from '../components/LoadingSpinner';
+import { chatManager } from '../lib/realTimeChatManager';
 
 const ChatbotEmbed: React.FC = () => {
   const { chatbotId } = useParams<{ chatbotId: string }>();
@@ -143,85 +144,71 @@ const ChatbotEmbed: React.FC = () => {
     initializeChatbot();
   }, [chatbotId, token, domain]);
 
-  // Set up real-time subscriptions for agent intervention using direct Supabase subscriptions
+  // Set up real-time subscriptions for agent intervention using chat manager
   useEffect(() => {
     if (!chatbotId || !currentSessionId) return;
 
-    console.log('🔄 Setting up real-time agent intervention detection for chatbot:', chatbotId);
+    console.log('🔄 Setting up real-time agent intervention detection via chat manager for chatbot:', chatbotId);
 
-    // Helper function to generate conversation ID from chatbot and session
-    const generateConversationId = (chatbotId: string, sessionId: string): string => {
-      const combined = `${chatbotId}_${sessionId}`;
-      let hash = 0;
-      for (let i = 0; i < combined.length; i++) {
-        const char = combined.charCodeAt(i);
-        hash = ((hash << 5) - hash) + char;
-        hash = hash & hash;
+    // Ensure conversation exists and get conversation ID
+    const setupAgentSubscription = async () => {
+      try {
+        const conversationId = await chatManager.ensureConversation(chatbotId, currentSessionId);
+        
+        const unsubscribe = chatManager.subscribe({
+          conversationId,
+          onMessage: () => {}, // We don't need message handling here, just agent changes
+          onAgentChange: (payload) => {
+            console.log('🔔 Agent change detected in embed via chat manager:', payload);
+            
+            if (payload.eventType === 'INSERT') {
+              // Agent took over
+              handleAgentTakeover(payload.new);
+            } else if (payload.eventType === 'DELETE') {
+              // Agent handed back to bot
+              console.log('🤖 Agent handed conversation back to bot in embed');
+              setAgentInterventionDetected(false);
+              setCurrentAgentName(null);
+            }
+          }
+        });
+
+        return unsubscribe;
+      } catch (err) {
+        console.error('❌ Error setting up agent subscription:', err);
+        return () => {};
       }
-      const hashHex = Math.abs(hash).toString(16).padStart(8, '0');
-      return `${hashHex.substring(0, 8)}-${hashHex.substring(0, 4)}-4${hashHex.substring(1, 4)}-8${hashHex.substring(0, 3)}-${hashHex}${hashHex}`.substring(0, 36);
     };
 
-    const conversationId = generateConversationId(chatbotId, currentSessionId);
-
-    // Subscribe to agent intervention events
-    const agentChannel = supabase
-      .channel(`embed-agent-intervention-${conversationId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'conversation_agents',
-          filter: `conversation_id=eq.${conversationId}`,
-        },
-        async (payload) => {
-          console.log('🔔 Agent intervention detected in embed:', payload.new);
-          
-          try {
-            // Fetch agent details
-            const { data: agent, error } = await supabase
-              .from('agents')
-              .select('id, name, email, agent_id')
-              .eq('id', payload.new.agent_id)
-              .single();
-            
-            if (error) {
-              console.error('Failed to fetch agent:', error);
-              return;
-            }
-            
-            console.log('🤝 Agent has taken over conversation in embed:', agent.name);
-            setAgentInterventionDetected(true);
-            setCurrentAgentName(agent.name);
-          } catch (err) {
-            console.error('Error in agent intervention callback:', err);
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'DELETE',
-          schema: 'public',
-          table: 'conversation_agents',
-          filter: `conversation_id=eq.${conversationId}`,
-        },
-        () => {
-          console.log('🤖 Agent handed conversation back to bot in embed');
-          setAgentInterventionDetected(false);
-          setCurrentAgentName(null);
-        }
-      )
-      .subscribe((status) => {
-        console.log(`📡 Embed agent intervention channel status: ${status}`);
-      });
+    const unsubscribePromise = setupAgentSubscription();
 
     return () => {
-      console.log('🔄 Cleaning up agent intervention subscription');
-      agentChannel.unsubscribe();
+      unsubscribePromise.then(unsubscribe => unsubscribe());
     };
   }, [chatbotId, currentSessionId]);
+
+  // Handle agent takeover
+  const handleAgentTakeover = async (agentData: any) => {
+    try {
+      // Fetch agent details
+      const { data: agent, error } = await supabase
+        .from('agents')
+        .select('id, name, email, agent_id')
+        .eq('id', agentData.agent_id)
+        .single();
+      
+      if (error) {
+        console.error('Failed to fetch agent:', error);
+        return;
+      }
+      
+      console.log('🤝 Agent has taken over conversation in embed:', agent.name);
+      setAgentInterventionDetected(true);
+      setCurrentAgentName(agent.name);
+    } catch (err) {
+      console.error('Error in agent takeover handling:', err);
+    }
+  };
 
   if (loading) {
     return (

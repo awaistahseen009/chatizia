@@ -25,6 +25,7 @@ import { useAgents } from '../hooks/useAgents';
 import { useDocuments } from '../hooks/useDocuments';
 import { generateChatResponse, ChatMessage } from '../lib/openai';
 import { supabase } from '../lib/supabase';
+import { chatManager } from '../lib/realTimeChatManager';
 
 interface AssignedConversation {
   id: string;
@@ -80,81 +81,54 @@ const AgentDashboard: React.FC = () => {
     scrollToBottom();
   }, [messages]);
 
-  // Subscribe to real-time events for selected conversation
+  // Subscribe to real-time events for selected conversation using chat manager
   useEffect(() => {
     if (!selectedConversation || !currentAgent) return;
 
-    console.log('🔄 Setting up real-time subscriptions for conversation:', selectedConversation);
+    console.log('🔄 Setting up real-time subscriptions via chat manager for conversation:', selectedConversation);
 
-    // Subscribe to new messages in this conversation
-    const messageChannel = supabase
-      .channel(`agent-messages-${selectedConversation}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages',
-          filter: `conversation_id=eq.${selectedConversation}`,
-        },
-        (payload) => {
-          console.log('💬 New message received in agent dashboard:', payload.new);
+    const unsubscribe = chatManager.subscribe({
+      conversationId: selectedConversation,
+      onMessage: (message) => {
+        console.log('💬 New message received in agent dashboard via chat manager:', message);
+        
+        // Add the message immediately to the UI
+        setMessages((prev) => {
+          const exists = prev.some((msg) => msg.id === message.id);
+          if (exists) {
+            console.log('💬 Message already exists, skipping duplicate');
+            return prev;
+          }
           
-          // Add the message immediately to the UI
-          setMessages((prev) => {
-            const exists = prev.some((msg) => msg.id === payload.new.id);
-            if (exists) {
-              console.log('💬 Message already exists, skipping duplicate');
-              return prev;
-            }
-            
-            console.log('💬 Adding new real-time message to agent dashboard');
-            return [...prev, payload.new];
-          });
-          
-          // Update conversation list
-          setConversations((prev) =>
-            prev.map((conv) =>
-              conv.id === selectedConversation
-                ? {
-                    ...conv,
-                    lastMessage: payload.new.content,
-                    lastMessageTime: payload.new.created_at,
-                    messageCount: (conv.messageCount || 0) + 1,
-                  }
-                : conv
-            )
-          );
-        }
-      )
-      .subscribe((status) => {
-        console.log(`📡 Agent messages channel status: ${status}`);
-      });
-
-    // Subscribe to knowledge base toggles
-    const kbChannel = supabase
-      .channel(`agent-kb-${selectedConversation}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'conversation_agents',
-          filter: `conversation_id=eq.${selectedConversation}`,
-        },
-        (payload) => {
+          console.log('💬 Adding new real-time message to agent dashboard');
+          return [...prev, message as AgentMessage];
+        });
+        
+        // Update conversation list
+        setConversations((prev) =>
+          prev.map((conv) =>
+            conv.id === selectedConversation
+              ? {
+                  ...conv,
+                  lastMessage: message.content,
+                  lastMessageTime: message.created_at,
+                  messageCount: (conv.messageCount || 0) + 1,
+                }
+              : conv
+          )
+        );
+      },
+      onAgentChange: (payload) => {
+        console.log('🔔 Agent change detected in dashboard:', payload);
+        
+        if (payload.eventType === 'UPDATE') {
           console.log('🧠 Knowledge base toggled:', payload.new.knowledge_base_enabled);
           setUseKnowledgeBase(payload.new.knowledge_base_enabled || false);
         }
-      )
-      .subscribe((status) => {
-        console.log(`📡 Agent KB channel status: ${status}`);
-      });
+      }
+    });
 
-    return () => {
-      messageChannel.unsubscribe();
-      kbChannel.unsubscribe();
-    };
+    return unsubscribe;
   }, [selectedConversation, currentAgent]);
 
   useEffect(() => {
@@ -381,24 +355,10 @@ const AgentDashboard: React.FC = () => {
 
     setSendingMessage(true);
     try {
-      console.log('📤 Sending agent message...');
+      console.log('📤 Sending agent message via chat manager...');
       
-      // Insert message with agent identification
-      const { data, error } = await supabase
-        .from('messages')
-        .insert({
-          conversation_id: selectedConversation,
-          content: newMessage.trim(),
-          role: 'assistant',
-          agent_id: currentAgent!.id
-        })
-        .select()
-        .single();
-
-      if (error) {
-        console.error('❌ Failed to send agent message:', error);
-        throw error;
-      }
+      // Send message via chat manager - real-time subscription will handle UI update
+      await chatManager.sendMessage(selectedConversation, newMessage.trim(), 'assistant', currentAgent!.id);
 
       console.log('✅ Agent message sent successfully');
 
@@ -451,22 +411,8 @@ const AgentDashboard: React.FC = () => {
       // Generate response using knowledge base
       const response = await generateChatResponse(recentMessages as ChatMessage[], context);
 
-      // Send the enhanced response with agent identification
-      const { data, error } = await supabase
-        .from('messages')
-        .insert({
-          conversation_id: selectedConversation,
-          content: response.message,
-          role: 'assistant',
-          agent_id: currentAgent!.id
-        })
-        .select()
-        .single();
-
-      if (error) {
-        console.error('❌ Failed to send knowledge base response:', error);
-        throw error;
-      }
+      // Send the enhanced response via chat manager
+      await chatManager.sendMessage(selectedConversation, response.message, 'assistant', currentAgent!.id);
 
       console.log('✅ Knowledge base response sent successfully');
 
@@ -487,13 +433,8 @@ const AgentDashboard: React.FC = () => {
     try {
       const newValue = !useKnowledgeBase;
       
-      const { error } = await supabase
-        .from('conversation_agents')
-        .update({ knowledge_base_enabled: newValue })
-        .eq('conversation_id', selectedConversation)
-        .eq('agent_id', currentAgent!.id);
-
-      if (error) throw error;
+      // Use chat manager to toggle knowledge base
+      await chatManager.toggleKnowledgeBase(selectedConversation, newValue, currentAgent!.id);
       
       setUseKnowledgeBase(newValue);
       console.log(`🧠 Knowledge base ${newValue ? 'enabled' : 'disabled'}`);
@@ -511,15 +452,8 @@ const AgentDashboard: React.FC = () => {
 
     setHandBackToBot(true);
     try {
-      // Send a handoff message first
-      await supabase
-        .from('messages')
-        .insert({
-          conversation_id: selectedConversation,
-          content: "Thank you for your patience. I'm handing you back to our AI assistant who can continue to help you with your questions.",
-          role: 'assistant',
-          agent_id: currentAgent!.id
-        });
+      // Send a handoff message first via chat manager
+      await chatManager.sendMessage(selectedConversation, "Thank you for your patience. I'm handing you back to our AI assistant who can continue to help you with your questions.", 'assistant', currentAgent!.id);
 
       // Remove agent assignment from this conversation
       const { error } = await supabase
@@ -574,15 +508,8 @@ const AgentDashboard: React.FC = () => {
         chatbot_name: conversation?.chatbots?.name
       });
 
-      // Send takeover message
-      await supabase
-        .from('messages')
-        .insert({
-          conversation_id: conversationId,
-          content: `Hello! I'm ${currentAgent!.name}, a human agent. I've taken over this conversation to provide you with personalized assistance. How can I help you?`,
-          role: 'assistant',
-          agent_id: currentAgent!.id
-        });
+      // Send takeover message via chat manager
+      await chatManager.sendMessage(conversationId, `Hello! I'm ${currentAgent!.name}, a human agent. I've taken over this conversation to provide you with personalized assistance. How can I help you?`, 'assistant', currentAgent!.id);
 
       console.log('✅ Successfully took over conversation');
 

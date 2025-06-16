@@ -3,7 +3,6 @@ import { X, Send, Paperclip, Mic, Volume2, Minimize2, Maximize2, Brain, External
 import { useChatbot as useChatbotContext } from '../contexts/ChatbotContext';
 import { useChatbot } from '../hooks/useChatbot';
 import { openai } from '../lib/openai';
-import { supabase } from '../lib/supabase';
 
 interface ChatbotPreviewProps {
   visible: boolean;
@@ -52,7 +51,6 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   const [messages, setMessages] = useState<ExtendedMessage[]>([]);
   const [showTranscript, setShowTranscript] = useState<Record<string, boolean>>({});
   const [microphoneSupported, setMicrophoneSupported] = useState(true);
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -114,16 +112,6 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   useEffect(() => {
     if (bot && visible) {
       initializeChat();
-      // Use session ID from props if available (for embedded mode)
-      if (bot.currentSessionId && !currentSessionId) {
-        setCurrentSessionId(bot.currentSessionId);
-        console.log('🔄 Using session ID from props:', bot.currentSessionId);
-      } else if (!currentSessionId) {
-        // Generate session ID when chat initializes
-        const sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2)}`;
-        setCurrentSessionId(sessionId);
-        console.log('🔄 Generated session ID:', sessionId);
-      }
     }
   }, [bot, visible]);
 
