@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Smile, Paperclip, MoreVertical, Phone, Video, Info, Heart, ThumbsUp, Laugh, Angry, Salad as Sad, User, Bot, CheckCheck, Check, Circle, Image as ImageIcon, File, X, ArrowLeft, Settings, Search, Mic, Camera } from 'lucide-react';
+import { Send, Smile, Paperclip, MoreVertical, Phone, Video, Info, Heart, ThumbsUp, Laugh, Angry, Salad as Sad, User, Bot, CheckCheck, Check, Circle, Image as ImageIcon, File, X, ArrowLeft, Settings, Search, Mic, Camera, Wifi, WifiOff } from 'lucide-react';
 import { socketChatManager } from '../lib/socketChatManager';
 
 interface Message {
@@ -48,6 +48,7 @@ const SocialChatInterface: React.FC<SocialChatInterfaceProps> = ({
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const [showEmojiPicker, setShowEmojiPicker] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [connectionType, setConnectionType] = useState<'socket' | 'supabase'>('socket');
   const [showAttachments, setShowAttachments] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -155,6 +156,7 @@ const SocialChatInterface: React.FC<SocialChatInterfaceProps> = ({
     // Update connection status
     const checkConnection = () => {
       setIsConnected(socketChatManager.isConnected());
+      setConnectionType(socketChatManager.getConnectionType());
     };
     
     checkConnection();
@@ -342,6 +344,18 @@ const SocialChatInterface: React.FC<SocialChatInterfaceProps> = ({
         </div>
 
         <div className="flex items-center space-x-2">
+          {/* Connection Status Indicator */}
+          <div className="flex items-center space-x-1">
+            {isConnected ? (
+              <Wifi className="w-4 h-4 text-green-500" />
+            ) : (
+              <WifiOff className="w-4 h-4 text-red-500" />
+            )}
+            <span className="text-xs text-slate-500">
+              {connectionType === 'socket' ? 'Socket' : 'Realtime'}
+            </span>
+          </div>
+          
           <button className="p-2 hover:bg-white/50 rounded-full transition-colors">
             <Phone className="w-4 h-4 text-slate-600" />
           </button>
@@ -359,13 +373,44 @@ const SocialChatInterface: React.FC<SocialChatInterfaceProps> = ({
         <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2">
           <div className="flex items-center space-x-2">
             <Circle className="w-2 h-2 fill-yellow-500 text-yellow-500 animate-pulse" />
-            <span className="text-xs text-yellow-700">Connecting...</span>
+            <span className="text-xs text-yellow-700">Connecting to chat service...</span>
+          </div>
+        </div>
+      )}
+
+      {/* Connection Type Info */}
+      {isConnected && connectionType === 'supabase' && (
+        <div className="bg-blue-50 border-b border-blue-200 px-4 py-2">
+          <div className="flex items-center space-x-2">
+            <Circle className="w-2 h-2 fill-blue-500 text-blue-500" />
+            <span className="text-xs text-blue-700">Using Supabase Realtime (Socket.IO unavailable)</span>
           </div>
         </div>
       )}
 
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gradient-to-b from-slate-50/30 to-white">
+        {messages.length === 0 && (
+          <div className="text-center py-8">
+            <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center mx-auto mb-4">
+              {chatPartner.role === 'agent' ? (
+                <User className="w-8 h-8 text-white" />
+              ) : (
+                <Bot className="w-8 h-8 text-white" />
+              )}
+            </div>
+            <h3 className="text-lg font-semibold text-slate-800 mb-2">
+              Chat with {chatPartner.name}
+            </h3>
+            <p className="text-slate-600">
+              {chatPartner.role === 'agent' 
+                ? 'You\'re now connected with a human agent who can help you with your questions.'
+                : 'Start a conversation with our AI assistant. Ask anything you\'d like to know!'
+              }
+            </p>
+          </div>
+        )}
+
         {messages.map((message) => {
           const isOwnMessage = message.role === 'user' && message.sender_name === currentUser.name;
           const isAgent = message.role === 'agent';
@@ -416,30 +461,32 @@ const SocialChatInterface: React.FC<SocialChatInterfaceProps> = ({
                       {isOwnMessage && getMessageStatus(message)}
                     </div>
 
-                    {/* Quick Reactions */}
-                    <div className="absolute -bottom-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <div className="flex items-center space-x-1 bg-white rounded-full shadow-lg border border-slate-200 px-2 py-1">
-                        {quickReactions.map((emoji) => (
+                    {/* Quick Reactions - Only show for Socket.IO mode */}
+                    {connectionType === 'socket' && (
+                      <div className="absolute -bottom-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="flex items-center space-x-1 bg-white rounded-full shadow-lg border border-slate-200 px-2 py-1">
+                          {quickReactions.map((emoji) => (
+                            <button
+                              key={emoji}
+                              onClick={() => handleAddReaction(message.id, emoji)}
+                              className="hover:scale-110 transition-transform"
+                            >
+                              <span className="text-sm">{emoji}</span>
+                            </button>
+                          ))}
                           <button
-                            key={emoji}
-                            onClick={() => handleAddReaction(message.id, emoji)}
-                            className="hover:scale-110 transition-transform"
+                            onClick={() => setShowEmojiPicker(showEmojiPicker === message.id ? null : message.id)}
+                            className="p-1 hover:bg-slate-100 rounded-full transition-colors"
                           >
-                            <span className="text-sm">{emoji}</span>
+                            <Smile className="w-3 h-3 text-slate-400" />
                           </button>
-                        ))}
-                        <button
-                          onClick={() => setShowEmojiPicker(showEmojiPicker === message.id ? null : message.id)}
-                          className="p-1 hover:bg-slate-100 rounded-full transition-colors"
-                        >
-                          <Smile className="w-3 h-3 text-slate-400" />
-                        </button>
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
 
-                  {/* Reactions */}
-                  {message.reactions && message.reactions.length > 0 && (
+                  {/* Reactions - Only show for Socket.IO mode */}
+                  {connectionType === 'socket' && message.reactions && message.reactions.length > 0 && (
                     <div className="flex flex-wrap gap-1 mt-1">
                       {message.reactions.map((reaction, index) => (
                         <div
@@ -454,8 +501,8 @@ const SocialChatInterface: React.FC<SocialChatInterfaceProps> = ({
                     </div>
                   )}
 
-                  {/* Emoji Picker */}
-                  {showEmojiPicker === message.id && (
+                  {/* Emoji Picker - Only show for Socket.IO mode */}
+                  {connectionType === 'socket' && showEmojiPicker === message.id && (
                     <div className="absolute z-10 mt-2 bg-white rounded-lg shadow-lg border border-slate-200 p-2">
                       <div className="grid grid-cols-5 gap-1">
                         {emojis.map((emoji) => (
@@ -476,8 +523,8 @@ const SocialChatInterface: React.FC<SocialChatInterfaceProps> = ({
           );
         })}
 
-        {/* Typing Indicator */}
-        {typingUsers.length > 0 && (
+        {/* Typing Indicator - Only show for Socket.IO mode */}
+        {connectionType === 'socket' && typingUsers.length > 0 && (
           <div className="flex justify-start">
             <div className="flex items-center space-x-2">
               <div className="w-8 h-8 bg-slate-200 rounded-full flex items-center justify-center">
@@ -525,46 +572,48 @@ const SocialChatInterface: React.FC<SocialChatInterfaceProps> = ({
 
         {/* Input Row */}
         <div className="flex items-end space-x-3">
-          {/* Attachment Button */}
-          <div className="relative">
-            <button
-              onClick={() => setShowAttachments(!showAttachments)}
-              className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors"
-            >
-              <Paperclip className="w-5 h-5" />
-            </button>
+          {/* Attachment Button - Only show for Socket.IO mode */}
+          {connectionType === 'socket' && (
+            <div className="relative">
+              <button
+                onClick={() => setShowAttachments(!showAttachments)}
+                className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors"
+              >
+                <Paperclip className="w-5 h-5" />
+              </button>
 
-            {/* Attachment Menu */}
-            {showAttachments && (
-              <div className="absolute bottom-full left-0 mb-2 bg-white rounded-lg shadow-lg border border-slate-200 p-2">
-                <div className="flex flex-col space-y-1">
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex items-center space-x-2 px-3 py-2 hover:bg-slate-100 rounded-md transition-colors"
-                  >
-                    <File className="w-4 h-4 text-slate-500" />
-                    <span className="text-sm text-slate-700">File</span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (fileInputRef.current) {
-                        fileInputRef.current.accept = 'image/*';
-                        fileInputRef.current.click();
-                      }
-                    }}
-                    className="flex items-center space-x-2 px-3 py-2 hover:bg-slate-100 rounded-md transition-colors"
-                  >
-                    <ImageIcon className="w-4 h-4 text-blue-500" />
-                    <span className="text-sm text-slate-700">Image</span>
-                  </button>
-                  <button className="flex items-center space-x-2 px-3 py-2 hover:bg-slate-100 rounded-md transition-colors">
-                    <Camera className="w-4 h-4 text-green-500" />
-                    <span className="text-sm text-slate-700">Camera</span>
-                  </button>
+              {/* Attachment Menu */}
+              {showAttachments && (
+                <div className="absolute bottom-full left-0 mb-2 bg-white rounded-lg shadow-lg border border-slate-200 p-2">
+                  <div className="flex flex-col space-y-1">
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="flex items-center space-x-2 px-3 py-2 hover:bg-slate-100 rounded-md transition-colors"
+                    >
+                      <File className="w-4 h-4 text-slate-500" />
+                      <span className="text-sm text-slate-700">File</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (fileInputRef.current) {
+                          fileInputRef.current.accept = 'image/*';
+                          fileInputRef.current.click();
+                        }
+                      }}
+                      className="flex items-center space-x-2 px-3 py-2 hover:bg-slate-100 rounded-md transition-colors"
+                    >
+                      <ImageIcon className="w-4 h-4 text-blue-500" />
+                      <span className="text-sm text-slate-700">Image</span>
+                    </button>
+                    <button className="flex items-center space-x-2 px-3 py-2 hover:bg-slate-100 rounded-md transition-colors">
+                      <Camera className="w-4 h-4 text-green-500" />
+                      <span className="text-sm text-slate-700">Camera</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
 
           {/* Message Input */}
           <div className="flex-1 relative">
@@ -572,7 +621,9 @@ const SocialChatInterface: React.FC<SocialChatInterfaceProps> = ({
               value={newMessage}
               onChange={(e) => {
                 setNewMessage(e.target.value);
-                handleTyping();
+                if (connectionType === 'socket') {
+                  handleTyping();
+                }
               }}
               onKeyPress={handleKeyPress}
               placeholder={isConnected ? "Type a message..." : "Connecting..."}
@@ -585,13 +636,15 @@ const SocialChatInterface: React.FC<SocialChatInterfaceProps> = ({
               }}
             />
             
-            {/* Emoji Button */}
-            <button
-              onClick={() => setShowEmojiPicker(showEmojiPicker === 'input' ? null : 'input')}
-              className="absolute right-3 top-1/2 transform -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 transition-colors"
-            >
-              <Smile className="w-5 h-5" />
-            </button>
+            {/* Emoji Button - Only show for Socket.IO mode */}
+            {connectionType === 'socket' && (
+              <button
+                onClick={() => setShowEmojiPicker(showEmojiPicker === 'input' ? null : 'input')}
+                className="absolute right-3 top-1/2 transform -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 transition-colors"
+              >
+                <Smile className="w-5 h-5" />
+              </button>
+            )}
           </div>
 
           {/* Voice/Send Button */}
@@ -612,8 +665,8 @@ const SocialChatInterface: React.FC<SocialChatInterfaceProps> = ({
           </div>
         </div>
 
-        {/* Input Emoji Picker */}
-        {showEmojiPicker === 'input' && (
+        {/* Input Emoji Picker - Only show for Socket.IO mode */}
+        {connectionType === 'socket' && showEmojiPicker === 'input' && (
           <div className="absolute bottom-full right-4 mb-2 bg-white rounded-lg shadow-lg border border-slate-200 p-3 z-10">
             <div className="grid grid-cols-8 gap-2">
               {emojis.map((emoji) => (

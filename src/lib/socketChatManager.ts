@@ -43,28 +43,78 @@ interface SubscriptionOptions {
 }
 
 export class SocketChatManager {
-  private socket: Socket;
+  private socket: Socket | null = null;
   private connected: boolean = false;
   private currentConversation: string | null = null;
   private currentUser: { id: string; name: string } | null = null;
   private typingTimeout: NodeJS.Timeout | null = null;
+  private useSupabaseRealtime: boolean = false;
+  private supabaseSubscriptions: any[] = [];
+  private connectionAttempts: number = 0;
+  private maxConnectionAttempts: number = 3;
 
   constructor() {
-    // Use the deployed URL for socket connection
-    this.socket = io('https://playful-bunny-30d50a.netlify.app', {
-      autoConnect: false,
-      transports: ['websocket', 'polling'],
-      timeout: 20000,
-      forceNew: true,
-    });
-
-    this.setupEventListeners();
+    // Try to connect to socket server, but fallback to Supabase Realtime if it fails
+    this.initializeConnection();
   }
 
-  private setupEventListeners() {
+  private async initializeConnection() {
+    try {
+      console.log('🔄 Attempting to connect to Socket.IO server...');
+      
+      // Try to connect to a real Socket.IO server
+      // For demo purposes, we'll use a public Socket.IO test server
+      this.socket = io('https://socket-io-chat.now.sh', {
+        autoConnect: false,
+        transports: ['websocket', 'polling'],
+        timeout: 5000,
+        forceNew: true,
+      });
+
+      this.setupSocketEventListeners();
+      
+      // Try to connect
+      this.socket.connect();
+      
+      // Wait for connection or timeout
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Connection timeout'));
+        }, 5000);
+
+        this.socket!.on('connect', () => {
+          clearTimeout(timeout);
+          resolve(true);
+        });
+
+        this.socket!.on('connect_error', (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        });
+      });
+
+      console.log('✅ Socket.IO connection successful');
+      this.useSupabaseRealtime = false;
+      
+    } catch (error) {
+      console.log('❌ Socket.IO connection failed, falling back to Supabase Realtime:', error.message);
+      this.useSupabaseRealtime = true;
+      this.connected = true; // Mark as connected for Supabase Realtime mode
+      
+      if (this.socket) {
+        this.socket.disconnect();
+        this.socket = null;
+      }
+    }
+  }
+
+  private setupSocketEventListeners() {
+    if (!this.socket) return;
+
     this.socket.on('connect', () => {
-      console.log(`📡 Socket connected: ${this.socket.id}`);
+      console.log(`📡 Socket connected: ${this.socket!.id}`);
       this.connected = true;
+      this.connectionAttempts = 0;
       
       // Rejoin conversation if we were in one
       if (this.currentConversation && this.currentUser) {
@@ -79,6 +129,14 @@ export class SocketChatManager {
 
     this.socket.on('connect_error', (error) => {
       console.error('❌ Socket connection error:', error);
+      this.connectionAttempts++;
+      
+      if (this.connectionAttempts >= this.maxConnectionAttempts) {
+        console.log('🔄 Max connection attempts reached, switching to Supabase Realtime');
+        this.useSupabaseRealtime = true;
+        this.connected = true;
+        this.socket?.disconnect();
+      }
     });
 
     this.socket.on('error', (error) => {
@@ -94,9 +152,15 @@ export class SocketChatManager {
     });
   }
 
-  // Connect to the socket server
+  // Connect to the socket server or use Supabase Realtime
   connect() {
-    if (!this.connected && !this.socket.connected) {
+    if (this.useSupabaseRealtime) {
+      console.log('📡 Using Supabase Realtime for chat');
+      this.connected = true;
+      return;
+    }
+
+    if (!this.connected && this.socket && !this.socket.connected) {
       console.log('🔄 Connecting to socket server...');
       this.socket.connect();
     }
@@ -107,17 +171,32 @@ export class SocketChatManager {
     if (this.currentConversation) {
       this.leaveConversation(this.currentConversation);
     }
-    this.socket.disconnect();
+    
+    if (this.socket) {
+      this.socket.disconnect();
+    }
+    
+    // Clean up Supabase subscriptions
+    this.supabaseSubscriptions.forEach(subscription => {
+      subscription.unsubscribe();
+    });
+    this.supabaseSubscriptions = [];
+    
     this.connected = false;
     this.currentConversation = null;
     this.currentUser = null;
-    console.log('📡 Socket disconnected manually');
+    console.log('📡 Disconnected from chat service');
   }
 
   // Join a conversation room
   private joinConversation(conversationId: string, userId: string, userName: string) {
+    if (this.useSupabaseRealtime) {
+      console.log(`🚪 Joining conversation via Supabase: ${conversationId} as ${userName}`);
+      return;
+    }
+
     console.log(`🚪 Joining conversation: ${conversationId} as ${userName}`);
-    this.socket.emit('join_conversation', {
+    this.socket?.emit('join_conversation', {
       conversationId,
       userId,
       userName,
@@ -126,8 +205,13 @@ export class SocketChatManager {
 
   // Leave a conversation room
   private leaveConversation(conversationId: string) {
+    if (this.useSupabaseRealtime) {
+      console.log(`🚪 Leaving conversation via Supabase: ${conversationId}`);
+      return;
+    }
+
     console.log(`🚪 Leaving conversation: ${conversationId}`);
-    this.socket.emit('leave_conversation', { conversationId });
+    this.socket?.emit('leave_conversation', { conversationId });
   }
 
   // Subscribe to conversation events
@@ -151,10 +235,20 @@ export class SocketChatManager {
     this.currentConversation = conversationId;
     this.currentUser = { id: userId, name: userName };
 
+    if (this.useSupabaseRealtime) {
+      return this.subscribeWithSupabase({
+        conversationId,
+        userId,
+        userName,
+        onMessage,
+        onAgentChange,
+      });
+    }
+
     // Join the conversation room
     this.joinConversation(conversationId, userId, userName);
 
-    // Set up event listeners
+    // Set up event listeners for Socket.IO
     const messageHandler = (message: ChatMessage) => {
       console.log(`💬 New message in ${conversationId}:`, message);
       onMessage(message);
@@ -186,21 +280,21 @@ export class SocketChatManager {
     };
 
     // Register event listeners
-    this.socket.on('new_message', messageHandler);
-    this.socket.on('typing_indicator', typingHandler);
-    this.socket.on('online_status', onlineStatusHandler);
-    this.socket.on('agent_change', agentChangeHandler);
-    this.socket.on('message_read', messageReadHandler);
-    this.socket.on('reaction_added', reactionHandler);
+    this.socket?.on('new_message', messageHandler);
+    this.socket?.on('typing_indicator', typingHandler);
+    this.socket?.on('online_status', onlineStatusHandler);
+    this.socket?.on('agent_change', agentChangeHandler);
+    this.socket?.on('message_read', messageReadHandler);
+    this.socket?.on('reaction_added', reactionHandler);
 
     // Return cleanup function
     return () => {
-      this.socket.off('new_message', messageHandler);
-      this.socket.off('typing_indicator', typingHandler);
-      this.socket.off('online_status', onlineStatusHandler);
-      this.socket.off('agent_change', agentChangeHandler);
-      this.socket.off('message_read', messageReadHandler);
-      this.socket.off('reaction_added', reactionHandler);
+      this.socket?.off('new_message', messageHandler);
+      this.socket?.off('typing_indicator', typingHandler);
+      this.socket?.off('online_status', onlineStatusHandler);
+      this.socket?.off('agent_change', agentChangeHandler);
+      this.socket?.off('message_read', messageReadHandler);
+      this.socket?.off('reaction_added', reactionHandler);
       
       if (this.currentConversation === conversationId) {
         this.leaveConversation(conversationId);
@@ -209,6 +303,77 @@ export class SocketChatManager {
       }
       
       console.log(`🔄 Unsubscribed from conversation: ${conversationId}`);
+    };
+  }
+
+  // Subscribe using Supabase Realtime as fallback
+  private subscribeWithSupabase({
+    conversationId,
+    userId,
+    userName,
+    onMessage,
+    onAgentChange,
+  }: {
+    conversationId: string;
+    userId: string;
+    userName: string;
+    onMessage: (message: ChatMessage) => void;
+    onAgentChange?: (payload: { eventType: string; data: any }) => void;
+  }) {
+    console.log(`📡 Setting up Supabase Realtime for conversation: ${conversationId}`);
+
+    // Subscribe to messages
+    const messageSubscription = supabase
+      .channel(`messages-${conversationId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `conversation_id=eq.${conversationId}`,
+        },
+        (payload) => {
+          console.log('💬 New message via Supabase:', payload.new);
+          onMessage(payload.new as ChatMessage);
+        }
+      )
+      .subscribe();
+
+    this.supabaseSubscriptions.push(messageSubscription);
+
+    // Subscribe to agent changes if provided
+    if (onAgentChange) {
+      const agentSubscription = supabase
+        .channel(`agent-changes-${conversationId}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'conversation_agents',
+            filter: `conversation_id=eq.${conversationId}`,
+          },
+          (payload) => {
+            console.log('🔔 Agent change via Supabase:', payload);
+            onAgentChange({
+              eventType: payload.eventType,
+              data: payload.new || payload.old,
+            });
+          }
+        )
+        .subscribe();
+
+      this.supabaseSubscriptions.push(agentSubscription);
+    }
+
+    // Return cleanup function
+    return () => {
+      this.supabaseSubscriptions.forEach(subscription => {
+        subscription.unsubscribe();
+      });
+      this.supabaseSubscriptions = [];
+      console.log(`🔄 Unsubscribed from Supabase Realtime: ${conversationId}`);
     };
   }
 
@@ -221,13 +386,34 @@ export class SocketChatManager {
     messageType: 'text' | 'image' | 'file' = 'text'
   ): Promise<void> {
     if (!this.connected) {
-      throw new Error('Socket not connected');
+      throw new Error('Chat service not connected');
     }
 
     console.log(`📤 Sending message to ${conversationId}:`, { content, role, agentId, messageType });
 
+    if (this.useSupabaseRealtime) {
+      // Send message directly to Supabase
+      const { error } = await supabase
+        .from('messages')
+        .insert({
+          conversation_id: conversationId,
+          content,
+          role,
+          agent_id: agentId,
+        });
+
+      if (error) {
+        console.error(`❌ Failed to send message via Supabase:`, error);
+        throw new Error(error.message);
+      }
+
+      console.log(`✅ Message sent via Supabase to ${conversationId}`);
+      return;
+    }
+
+    // Send via Socket.IO
     return new Promise((resolve, reject) => {
-      this.socket.emit(
+      this.socket?.emit(
         'send_message',
         {
           conversationId,
@@ -261,8 +447,14 @@ export class SocketChatManager {
       this.typingTimeout = null;
     }
 
+    if (this.useSupabaseRealtime) {
+      // For Supabase Realtime, we could implement typing indicators via a separate table
+      // For now, we'll skip this feature in fallback mode
+      return;
+    }
+
     console.log(`⌨️ Sending typing indicator: ${isTyping} for ${conversationId}`);
-    this.socket.emit('typing_indicator', {
+    this.socket?.emit('typing_indicator', {
       conversationId,
       userId: this.currentUser.id,
       userName: this.currentUser.name,
@@ -281,8 +473,14 @@ export class SocketChatManager {
   markMessageAsRead(conversationId: string, messageId: string) {
     if (!this.connected || !this.currentUser) return;
 
+    if (this.useSupabaseRealtime) {
+      // For Supabase Realtime, we could implement read receipts via a separate table
+      // For now, we'll skip this feature in fallback mode
+      return;
+    }
+
     console.log(`👁️ Marking message as read: ${messageId}`);
-    this.socket.emit('mark_message_read', {
+    this.socket?.emit('mark_message_read', {
       conversationId,
       messageId,
       userId: this.currentUser.id,
@@ -294,8 +492,14 @@ export class SocketChatManager {
   addReaction(conversationId: string, messageId: string, emoji: string) {
     if (!this.connected || !this.currentUser) return;
 
+    if (this.useSupabaseRealtime) {
+      // For Supabase Realtime, we could implement reactions via a separate table
+      // For now, we'll skip this feature in fallback mode
+      return;
+    }
+
     console.log(`😀 Adding reaction ${emoji} to message: ${messageId}`);
-    this.socket.emit('add_reaction', {
+    this.socket?.emit('add_reaction', {
       conversationId,
       messageId,
       emoji,
@@ -308,8 +512,14 @@ export class SocketChatManager {
   updateOnlineStatus(conversationId: string, isOnline: boolean) {
     if (!this.connected || !this.currentUser) return;
 
+    if (this.useSupabaseRealtime) {
+      // For Supabase Realtime, we could implement online status via a separate table
+      // For now, we'll skip this feature in fallback mode
+      return;
+    }
+
     console.log(`🟢 Updating online status: ${isOnline} for ${conversationId}`);
-    this.socket.emit('update_online_status', {
+    this.socket?.emit('update_online_status', {
       conversationId,
       userId: this.currentUser.id,
       userName: this.currentUser.name,
@@ -321,8 +531,13 @@ export class SocketChatManager {
   notifyAgentChange(conversationId: string, eventType: string, data: any) {
     if (!this.connected) return;
 
+    if (this.useSupabaseRealtime) {
+      // Agent changes are handled automatically via Supabase triggers
+      return;
+    }
+
     console.log(`🔔 Notifying agent change for ${conversationId}:`, { eventType, data });
-    this.socket.emit('agent_change', {
+    this.socket?.emit('agent_change', {
       conversationId,
       eventType,
       data,
@@ -373,7 +588,7 @@ export class SocketChatManager {
 
   // Get connection status
   isConnected(): boolean {
-    return this.connected && this.socket.connected;
+    return this.connected;
   }
 
   // Get current user info
@@ -384,6 +599,11 @@ export class SocketChatManager {
   // Get current conversation
   getCurrentConversation() {
     return this.currentConversation;
+  }
+
+  // Get connection type
+  getConnectionType(): 'socket' | 'supabase' {
+    return this.useSupabaseRealtime ? 'supabase' : 'socket';
   }
 }
 
