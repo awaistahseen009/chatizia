@@ -3,6 +3,8 @@ import { X, Send, Paperclip, Mic, Volume2, Minimize2, Maximize2, Brain, External
 import { useChatbot as useChatbotContext } from '../contexts/ChatbotContext';
 import { useChatbot } from '../hooks/useChatbot';
 import { openai } from '../lib/openai';
+import { socketChatManager } from '../lib/socketChatManager';
+import SocialChatInterface from './SocialChatInterface';
 
 interface ChatbotPreviewProps {
   visible: boolean;
@@ -42,7 +44,7 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   const [inputText, setInputText] = useState('');
   const [isMinimized, setIsMinimized] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [replyMode, setReplyMode] = useState<'text' | 'voice'>('text');
+  const [replyMode, setReplyMode] = useState<'text' | 'voice' | 'social'>('social');
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessingVoice, setIsProcessingVoice] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
@@ -51,6 +53,9 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   const [messages, setMessages] = useState<ExtendedMessage[]>([]);
   const [showTranscript, setShowTranscript] = useState<Record<string, boolean>>({});
   const [microphoneSupported, setMicrophoneSupported] = useState(true);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<{ id: string; name: string; avatar?: string } | null>(null);
+  const [chatPartner, setChatPartner] = useState<{ id: string; name: string; avatar?: string; role: 'agent' | 'bot' } | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -70,6 +75,66 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Initialize social chat when bot is available
+  useEffect(() => {
+    if (bot && visible) {
+      initializeSocialChat();
+    }
+  }, [bot, visible]);
+
+  const initializeSocialChat = async () => {
+    if (!bot) return;
+
+    try {
+      // Generate session ID for this chat session
+      const sessionId = bot.currentSessionId || `session_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+      
+      // Ensure conversation exists
+      const convId = await socketChatManager.ensureConversation(bot.id, sessionId);
+      setConversationId(convId);
+
+      // Set up current user (customer)
+      const user = {
+        id: `user_${sessionId}`,
+        name: 'Customer',
+        avatar: undefined
+      };
+      setCurrentUser(user);
+
+      // Set up chat partner (initially bot, can change to agent)
+      const partner = {
+        id: bot.id,
+        name: bot.name || 'AI Assistant',
+        avatar: bot.configuration?.useCustomImage ? bot.configuration?.botImage : undefined,
+        role: agentTakenOver ? 'agent' : 'bot' as 'agent' | 'bot'
+      };
+      setChatPartner(partner);
+
+      console.log('🚀 Social chat initialized:', { convId, user, partner });
+    } catch (error) {
+      console.error('❌ Failed to initialize social chat:', error);
+    }
+  };
+
+  // Update chat partner when agent takes over
+  useEffect(() => {
+    if (agentTakenOver && assignedAgent && chatPartner) {
+      setChatPartner({
+        ...chatPartner,
+        id: assignedAgent.id,
+        name: assignedAgent.name,
+        role: 'agent'
+      });
+    } else if (!agentTakenOver && bot && chatPartner) {
+      setChatPartner({
+        ...chatPartner,
+        id: bot.id,
+        name: bot.name || 'AI Assistant',
+        role: 'bot'
+      });
+    }
+  }, [agentTakenOver, assignedAgent, bot, chatPartner]);
 
   // Check microphone permissions and support
   useEffect(() => {
@@ -432,6 +497,22 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
       ? "fixed inset-0 z-50" 
       : "fixed right-6 top-20 bottom-6 w-80 z-50";
 
+  // Render Social Chat Interface if in social mode and we have the required data
+  if (replyMode === 'social' && conversationId && currentUser && chatPartner) {
+    return (
+      <div className={containerClasses}>
+        <SocialChatInterface
+          conversationId={conversationId}
+          currentUser={currentUser}
+          chatPartner={chatPartner}
+          onClose={embedded ? undefined : onClose}
+          embedded={embedded}
+        />
+      </div>
+    );
+  }
+
+  // Fallback to original chat interface for text/voice modes
   return (
     <div className={containerClasses}>
       <div className="bg-white rounded-lg shadow-2xl border border-slate-200 h-full flex flex-col overflow-hidden">
@@ -529,6 +610,17 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
 
             <div className="p-3 border-b border-slate-200 bg-slate-50">
               <div className="flex items-center justify-center space-x-1 bg-white rounded-lg p-1">
+                <button
+                  onClick={() => setReplyMode('social')}
+                  className={`flex-1 flex items-center justify-center space-x-2 px-3 py-2 rounded-md text-sm font-medium transition-all ${
+                    replyMode === 'social' 
+                      ? 'bg-blue-100 text-blue-700 shadow-sm' 
+                      : 'text-slate-600 hover:text-slate-800'
+                  }`}
+                >
+                  <User className="w-4 h-4" />
+                  <span>Social</span>
+                </button>
                 <button
                   onClick={() => setReplyMode('text')}
                   className={`flex-1 flex items-center justify-center space-x-2 px-3 py-2 rounded-md text-sm font-medium transition-all ${
@@ -756,7 +848,7 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
                     </button>
                   </div>
                 </div>
-              ) : (
+              ) : replyMode === 'voice' ? (
                 <div className="space-y-3">
                   <div className="flex items-center justify-center">
                     <div className="flex items-center space-x-4">
@@ -807,6 +899,10 @@ const ChatbotPreview: React.FC<ChatbotPreviewProps> = ({ visible, onClose, chatb
                         : 'Tap the microphone to start recording'}
                     </p>
                   </div>
+                </div>
+              ) : (
+                <div className="text-center py-4">
+                  <p className="text-sm text-slate-600">Switch to Social mode for the full chat experience</p>
                 </div>
               )}
               

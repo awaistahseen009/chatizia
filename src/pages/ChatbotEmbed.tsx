@@ -3,8 +3,9 @@ import { useParams, useSearchParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { ChatbotSecurity } from '../lib/chatbotSecurity';
 import ChatbotPreview from '../components/ChatbotPreview';
+import SocialChatInterface from '../components/SocialChatInterface';
 import LoadingSpinner from '../components/LoadingSpinner';
-import { chatManager } from '../lib/realTimeChatManager';
+import { socketChatManager } from '../lib/socketChatManager';
 
 const ChatbotEmbed: React.FC = () => {
   const { chatbotId } = useParams<{ chatbotId: string }>();
@@ -16,6 +17,10 @@ const ChatbotEmbed: React.FC = () => {
   const [agentInterventionDetected, setAgentInterventionDetected] = useState(false);
   const [currentAgentName, setCurrentAgentName] = useState<string | null>(null);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<{ id: string; name: string; avatar?: string } | null>(null);
+  const [chatPartner, setChatPartner] = useState<{ id: string; name: string; avatar?: string; role: 'agent' | 'bot' } | null>(null);
+  const [useSocialChat, setUseSocialChat] = useState(true);
 
   const isEmbedded = searchParams.get('embedded') === 'true';
   const token = searchParams.get('token');
@@ -98,6 +103,11 @@ const ChatbotEmbed: React.FC = () => {
         
         setChatbot(safeChatbot);
 
+        // Initialize social chat
+        if (useSocialChat) {
+          await initializeSocialChat(safeChatbot, sessionId);
+        }
+
         // Validate domain security if token is provided
         if (token) {
           const referrerDomain = ChatbotSecurity.getReferrerDomain();
@@ -142,50 +152,75 @@ const ChatbotEmbed: React.FC = () => {
     };
 
     initializeChatbot();
-  }, [chatbotId, token, domain]);
+  }, [chatbotId, token, domain, useSocialChat]);
 
-  // Set up real-time subscriptions for agent intervention using chat manager
+  const initializeSocialChat = async (bot: any, sessionId: string) => {
+    try {
+      // Ensure conversation exists
+      const convId = await socketChatManager.ensureConversation(bot.id, sessionId);
+      setConversationId(convId);
+
+      // Set up current user (customer)
+      const user = {
+        id: `customer_${sessionId}`,
+        name: 'Customer',
+        avatar: undefined
+      };
+      setCurrentUser(user);
+
+      // Set up chat partner (initially bot, can change to agent)
+      const partner = {
+        id: bot.id,
+        name: bot.name || 'AI Assistant',
+        avatar: bot.configuration?.useCustomImage ? bot.configuration?.botImage : undefined,
+        role: 'bot' as 'agent' | 'bot'
+      };
+      setChatPartner(partner);
+
+      console.log('🚀 Social chat initialized:', { convId, user, partner });
+    } catch (error) {
+      console.error('❌ Failed to initialize social chat:', error);
+    }
+  };
+
+  // Set up real-time subscriptions for agent intervention using socket manager
   useEffect(() => {
-    if (!chatbotId || !currentSessionId) return;
+    if (!chatbotId || !currentSessionId || !conversationId) return;
 
-    console.log('🔄 Setting up real-time agent intervention detection via chat manager for chatbot:', chatbotId);
+    console.log('🔄 Setting up real-time agent intervention detection via socket manager for chatbot:', chatbotId);
 
-    // Ensure conversation exists and get conversation ID
-    const setupAgentSubscription = async () => {
-      try {
-        const conversationId = await chatManager.ensureConversation(chatbotId, currentSessionId);
+    const unsubscribe = socketChatManager.subscribe({
+      conversationId,
+      userId: currentUser?.id || 'anonymous',
+      userName: currentUser?.name || 'Customer',
+      onMessage: () => {}, // We don't need message handling here for the embed
+      onAgentChange: (payload) => {
+        console.log('🔔 Agent change detected in embed via socket manager:', payload);
         
-        const unsubscribe = chatManager.subscribe({
-          conversationId,
-          onMessage: () => {}, // We don't need message handling here, just agent changes
-          onAgentChange: (payload) => {
-            console.log('🔔 Agent change detected in embed via chat manager:', payload);
-            
-            if (payload.eventType === 'INSERT') {
-              // Agent took over
-              handleAgentTakeover(payload.new);
-            } else if (payload.eventType === 'DELETE') {
-              // Agent handed back to bot
-              console.log('🤖 Agent handed conversation back to bot in embed');
-              setAgentInterventionDetected(false);
-              setCurrentAgentName(null);
-            }
+        if (payload.eventType === 'INSERT') {
+          // Agent took over
+          handleAgentTakeover(payload.data);
+        } else if (payload.eventType === 'DELETE') {
+          // Agent handed back to bot
+          console.log('🤖 Agent handed conversation back to bot in embed');
+          setAgentInterventionDetected(false);
+          setCurrentAgentName(null);
+          
+          // Update chat partner back to bot
+          if (chatbot && chatPartner) {
+            setChatPartner({
+              ...chatPartner,
+              id: chatbot.id,
+              name: chatbot.name || 'AI Assistant',
+              role: 'bot'
+            });
           }
-        });
-
-        return unsubscribe;
-      } catch (err) {
-        console.error('❌ Error setting up agent subscription:', err);
-        return () => {};
+        }
       }
-    };
+    });
 
-    const unsubscribePromise = setupAgentSubscription();
-
-    return () => {
-      unsubscribePromise.then(unsubscribe => unsubscribe());
-    };
-  }, [chatbotId, currentSessionId]);
+    return unsubscribe;
+  }, [chatbotId, currentSessionId, conversationId, currentUser, chatbot, chatPartner]);
 
   // Handle agent takeover
   const handleAgentTakeover = async (agentData: any) => {
@@ -205,6 +240,16 @@ const ChatbotEmbed: React.FC = () => {
       console.log('🤝 Agent has taken over conversation in embed:', agent.name);
       setAgentInterventionDetected(true);
       setCurrentAgentName(agent.name);
+      
+      // Update chat partner to agent
+      if (chatPartner) {
+        setChatPartner({
+          ...chatPartner,
+          id: agent.id,
+          name: agent.name,
+          role: 'agent'
+        });
+      }
     } catch (err) {
       console.error('Error in agent takeover handling:', err);
     }
@@ -246,7 +291,48 @@ const ChatbotEmbed: React.FC = () => {
     );
   }
 
-  // Render embedded chatbot - ALWAYS show the widget
+  // Render social chat interface if enabled and we have the required data
+  if (useSocialChat && conversationId && currentUser && chatPartner) {
+    if (isEmbedded) {
+      return (
+        <div className="w-full h-full min-h-screen">
+          <SocialChatInterface 
+            conversationId={conversationId}
+            currentUser={currentUser}
+            chatPartner={chatPartner}
+            embedded={true}
+          />
+        </div>
+      );
+    }
+
+    // Full-page social chat
+    return (
+      <div className="min-h-screen bg-slate-50">
+        <div className="container mx-auto px-4 py-8">
+          <div className="max-w-4xl mx-auto">
+            <div className="text-center mb-8">
+              <h1 className="text-3xl font-bold text-slate-800 mb-2">{chatbot.name}</h1>
+              {chatbot.description && (
+                <p className="text-slate-600">{chatbot.description}</p>
+              )}
+            </div>
+            
+            <div className="bg-white rounded-lg shadow-lg overflow-hidden" style={{ height: '600px' }}>
+              <SocialChatInterface 
+                conversationId={conversationId}
+                currentUser={currentUser}
+                chatPartner={chatPartner}
+                embedded={false}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Fallback to original chatbot preview
   if (isEmbedded) {
     return (
       <div className="w-full h-full min-h-screen">

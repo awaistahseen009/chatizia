@@ -25,7 +25,8 @@ import { useAgents } from '../hooks/useAgents';
 import { useDocuments } from '../hooks/useDocuments';
 import { generateChatResponse, ChatMessage } from '../lib/openai';
 import { supabase } from '../lib/supabase';
-import { chatManager } from '../lib/realTimeChatManager';
+import { socketChatManager } from '../lib/socketChatManager';
+import SocialChatInterface from '../components/SocialChatInterface';
 
 interface AssignedConversation {
   id: string;
@@ -70,6 +71,8 @@ const AgentDashboard: React.FC = () => {
   const [useKnowledgeBase, setUseKnowledgeBase] = useState(false);
   const [sendingWithKB, setSendingWithKB] = useState(false);
   const [handBackToBot, setHandBackToBot] = useState(false);
+  const [showSocialChat, setShowSocialChat] = useState(false);
+  const [currentChatPartner, setCurrentChatPartner] = useState<{ id: string; name: string; avatar?: string; role: 'agent' | 'bot' } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom when new messages arrive
@@ -80,56 +83,6 @@ const AgentDashboard: React.FC = () => {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
-
-  // Subscribe to real-time events for selected conversation using chat manager
-  useEffect(() => {
-    if (!selectedConversation || !currentAgent) return;
-
-    console.log('🔄 Setting up real-time subscriptions via chat manager for conversation:', selectedConversation);
-
-    const unsubscribe = chatManager.subscribe({
-      conversationId: selectedConversation,
-      onMessage: (message) => {
-        console.log('💬 New message received in agent dashboard via chat manager:', message);
-        
-        // Add the message immediately to the UI
-        setMessages((prev) => {
-          const exists = prev.some((msg) => msg.id === message.id);
-          if (exists) {
-            console.log('💬 Message already exists, skipping duplicate');
-            return prev;
-          }
-          
-          console.log('💬 Adding new real-time message to agent dashboard');
-          return [...prev, message as AgentMessage];
-        });
-        
-        // Update conversation list
-        setConversations((prev) =>
-          prev.map((conv) =>
-            conv.id === selectedConversation
-              ? {
-                  ...conv,
-                  lastMessage: message.content,
-                  lastMessageTime: message.created_at,
-                  messageCount: (conv.messageCount || 0) + 1,
-                }
-              : conv
-          )
-        );
-      },
-      onAgentChange: (payload) => {
-        console.log('🔔 Agent change detected in dashboard:', payload);
-        
-        if (payload.eventType === 'UPDATE') {
-          console.log('🧠 Knowledge base toggled:', payload.new.knowledge_base_enabled);
-          setUseKnowledgeBase(payload.new.knowledge_base_enabled || false);
-        }
-      }
-    });
-
-    return unsubscribe;
-  }, [selectedConversation, currentAgent]);
 
   useEffect(() => {
     if (!currentAgent) {
@@ -347,6 +300,18 @@ const AgentDashboard: React.FC = () => {
   const handleConversationSelect = (conversationId: string) => {
     console.log('🎯 Selecting conversation:', conversationId);
     setSelectedConversation(conversationId);
+    
+    // Set up social chat interface
+    const conversation = conversations.find(c => c.id === conversationId);
+    if (conversation) {
+      setCurrentChatPartner({
+        id: `customer_${conversationId}`,
+        name: 'Customer',
+        role: 'bot' // Customer is represented as 'bot' role in the interface
+      });
+      setShowSocialChat(true);
+    }
+    
     fetchMessages(conversationId);
   };
 
@@ -355,14 +320,14 @@ const AgentDashboard: React.FC = () => {
 
     setSendingMessage(true);
     try {
-      console.log('📤 Sending agent message via chat manager...');
+      console.log('📤 Sending agent message via socket manager...');
       
-      // Send message via chat manager - real-time subscription will handle UI update
-      await chatManager.sendMessage(selectedConversation, newMessage.trim(), 'assistant', currentAgent!.id);
+      // Send message via socket manager
+      await socketChatManager.sendMessage(selectedConversation, newMessage.trim(), 'assistant', currentAgent!.id);
 
       console.log('✅ Agent message sent successfully');
 
-      // Clear the input - the real-time subscription will handle adding the message
+      // Clear the input
       setNewMessage('');
 
     } catch (err) {
@@ -411,12 +376,12 @@ const AgentDashboard: React.FC = () => {
       // Generate response using knowledge base
       const response = await generateChatResponse(recentMessages as ChatMessage[], context);
 
-      // Send the enhanced response via chat manager
-      await chatManager.sendMessage(selectedConversation, response.message, 'assistant', currentAgent!.id);
+      // Send the enhanced response via socket manager
+      await socketChatManager.sendMessage(selectedConversation, response.message, 'assistant', currentAgent!.id);
 
       console.log('✅ Knowledge base response sent successfully');
 
-      // Clear the input - the real-time subscription will handle adding the message
+      // Clear the input
       setNewMessage('');
 
     } catch (err) {
@@ -433,8 +398,14 @@ const AgentDashboard: React.FC = () => {
     try {
       const newValue = !useKnowledgeBase;
       
-      // Use chat manager to toggle knowledge base
-      await chatManager.toggleKnowledgeBase(selectedConversation, newValue, currentAgent!.id);
+      // Update knowledge base setting in database
+      const { error } = await supabase
+        .from('conversation_agents')
+        .update({ knowledge_base_enabled: newValue })
+        .eq('conversation_id', selectedConversation)
+        .eq('agent_id', currentAgent!.id);
+      
+      if (error) throw error;
       
       setUseKnowledgeBase(newValue);
       console.log(`🧠 Knowledge base ${newValue ? 'enabled' : 'disabled'}`);
@@ -452,8 +423,8 @@ const AgentDashboard: React.FC = () => {
 
     setHandBackToBot(true);
     try {
-      // Send a handoff message first via chat manager
-      await chatManager.sendMessage(selectedConversation, "Thank you for your patience. I'm handing you back to our AI assistant who can continue to help you with your questions.", 'assistant', currentAgent!.id);
+      // Send a handoff message first via socket manager
+      await socketChatManager.sendMessage(selectedConversation, "Thank you for your patience. I'm handing you back to our AI assistant who can continue to help you with your questions.", 'assistant', currentAgent!.id);
 
       // Remove agent assignment from this conversation
       const { error } = await supabase
@@ -470,6 +441,8 @@ const AgentDashboard: React.FC = () => {
       fetchAssignedConversations();
       setSelectedConversation(null);
       setMessages([]);
+      setShowSocialChat(false);
+      setCurrentChatPartner(null);
     } catch (err) {
       console.error('Failed to hand back to bot:', err);
       alert('Failed to hand conversation back to bot');
@@ -508,8 +481,8 @@ const AgentDashboard: React.FC = () => {
         chatbot_name: conversation?.chatbots?.name
       });
 
-      // Send takeover message via chat manager
-      await chatManager.sendMessage(conversationId, `Hello! I'm ${currentAgent!.name}, a human agent. I've taken over this conversation to provide you with personalized assistance. How can I help you?`, 'assistant', currentAgent!.id);
+      // Send takeover message via socket manager
+      await socketChatManager.sendMessage(conversationId, `Hello! I'm ${currentAgent!.name}, a human agent. I've taken over this conversation to provide you with personalized assistance. How can I help you?`, 'assistant', currentAgent!.id);
 
       console.log('✅ Successfully took over conversation');
 
@@ -754,7 +727,22 @@ const AgentDashboard: React.FC = () => {
 
         {/* Main Chat Area */}
         <div className="flex-1 flex flex-col">
-          {selectedConversation ? (
+          {selectedConversation && showSocialChat && currentChatPartner ? (
+            <SocialChatInterface
+              conversationId={selectedConversation}
+              currentUser={{
+                id: currentAgent.id,
+                name: currentAgent.name,
+                avatar: undefined
+              }}
+              chatPartner={currentChatPartner}
+              onClose={() => {
+                setShowSocialChat(false);
+                setSelectedConversation(null);
+                setCurrentChatPartner(null);
+              }}
+            />
+          ) : selectedConversation ? (
             <>
               {/* Chat Header */}
               <div className="bg-white border-b border-slate-200 px-6 py-4">
@@ -783,6 +771,12 @@ const AgentDashboard: React.FC = () => {
                       <CheckCircle className="w-4 h-4" />
                       <span>Agent Connected</span>
                     </div>
+                    <button
+                      onClick={() => setShowSocialChat(true)}
+                      className="px-3 py-1 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+                    >
+                      Switch to Social Chat
+                    </button>
                     {hasKnowledgeBase && (
                       <button
                         onClick={handleToggleKnowledgeBase}
