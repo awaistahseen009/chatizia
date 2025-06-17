@@ -1,31 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Send, 
-  Smile, 
-  Paperclip, 
-  MoreVertical, 
-  Phone, 
-  Video, 
-  Info,
-  Heart,
-  ThumbsUp,
-  Laugh,
-  Angry,
-  Sad,
-  User,
-  Bot,
-  CheckCheck,
-  Check,
-  Circle,
-  Image as ImageIcon,
-  File,
-  X,
-  ArrowLeft,
-  Settings,
-  Search,
-  Mic,
-  Camera
-} from 'lucide-react';
+import { Send, Smile, Paperclip, MoreVertical, Phone, Video, Info, Heart, ThumbsUp, Laugh, Angry, Salad as Sad, User, Bot, CheckCheck, Check, Circle, Image as ImageIcon, File, X, ArrowLeft, Settings, Search, Mic, Camera } from 'lucide-react';
 import { socketChatManager } from '../lib/socketChatManager';
 
 interface Message {
